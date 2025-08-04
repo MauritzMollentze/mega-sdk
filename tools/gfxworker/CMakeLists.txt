@@ -51,11 +51,8 @@ endif()
 target_platform_compile_options(
     TARGET libgfxworker
     WINDOWS /W4
-            /wd4100 # unreferenced formal parameter
-            /wd4201 # nameless struct/union (nonstandard)
-            /wd4458 # identifier hides class member
             /we4800 # Implicit conversion from 'type' to bool. Possible information loss
-    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion -Wno-unused-parameter
+    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion
 )
 
 if(ENABLE_SDKLIB_WERROR)
@@ -63,7 +60,6 @@ if(ENABLE_SDKLIB_WERROR)
         TARGET libgfxworker
         WINDOWS /WX
         UNIX  $<$<CONFIG:Debug>: -Werror>
-        APPLE $<$<CONFIG:Debug>: -Wno-sign-conversion -Wno-overloaded-virtual>
     )
 endif()
 
@@ -80,11 +76,8 @@ target_link_libraries(gfxworker
 target_platform_compile_options(
     TARGET gfxworker
     WINDOWS /W4
-            /wd4100 # unreferenced formal parameter
-            /wd4201 # nameless struct/union (nonstandard)
-            /wd4458 # identifier hides class member
             /we4800 # Implicit conversion from 'type' to bool. Possible information loss
-    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion -Wno-unused-parameter
+    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion
 )
 
 if(ENABLE_SDKLIB_WERROR)
@@ -92,7 +85,6 @@ if(ENABLE_SDKLIB_WERROR)
         TARGET gfxworker
         WINDOWS /WX
         UNIX  $<$<CONFIG:Debug>: -Werror>
-        APPLE $<$<CONFIG:Debug>: -Wno-sign-conversion -Wno-overloaded-virtual>
     )
 endif()
 

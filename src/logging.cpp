@@ -37,27 +37,17 @@ Logger *SimpleLogger::logger = &g_externalLogger;
 std::atomic<LogLevel> SimpleLogger::logCurrentLevel{logInfo};
 long long SimpleLogger::maxPayloadLogSize  = 10240;
 
-thread_local bool SimpleLogger::mThreadLocalLoggingDisabled = false;
-
-#ifdef ENABLE_LOG_PERFORMANCE
-
-thread_local std::array<char, LOGGER_CHUNKS_SIZE> SimpleLogger::mBuffer;
-#ifndef NDEBUG
-thread_local const SimpleLogger* SimpleLogger::mBufferOwner = nullptr;
-#endif
-
-#else
-
+#ifndef ENABLE_LOG_PERFORMANCE
 std::string SimpleLogger::getTime()
 {
     char ts[50];
-    time_t t = std::time(NULL);
+    time_t currentTime = std::time(NULL);
     std::tm tm{};
 
 #ifdef WIN32
-    gmtime_s(&tm, &t);
+    gmtime_s(&tm, &currentTime);
 #else
-    gmtime_r(&t, &tm);
+    gmtime_r(&currentTime, &tm);
 #endif
 
     if (std::strftime(ts, sizeof(ts), "%H:%M:%S", &tm)) return ts;
@@ -154,7 +144,8 @@ void ExternalLogger::log(const char *time, int loglevel, const char *source, con
 #ifdef ENABLE_LOG_PERFORMANCE
         for (unsigned i = 0; i < numberMessages; ++i)
         {
-            std::cout.write(directMessages[i], directMessagesSizes[i]);
+            std::cout.write(directMessages[i],
+                            static_cast<std::streamsize>(directMessagesSizes[i]));
         }
 #endif
         std::cout << std::endl;

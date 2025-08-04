@@ -139,7 +139,6 @@ private:
 #endif
 
     bool launched = false;
-    bool redirectStdin = false;
 
     // reads stdout from the sub process
     AutoFileHandle readFd;
@@ -383,7 +382,7 @@ public:
 
     // display in stdout
     void show() const;
-    void setPrefix(const std::string &value);
+    void setPrefix(const std::string& newPrefix);
 };
 
 // must be outside mega namespace

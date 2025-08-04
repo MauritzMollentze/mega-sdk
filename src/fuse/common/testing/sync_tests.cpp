@@ -1,10 +1,13 @@
+#include <mega/common/normalized_path.h>
 #include <mega/fuse/common/logging.h>
+#include <mega/fuse/common/mount_event.h>
+#include <mega/fuse/common/mount_event_type.h>
 #include <mega/fuse/common/mount_info.h>
 #include <mega/fuse/common/mount_result.h>
-#include <mega/fuse/common/normalized_path.h>
 #include <mega/fuse/common/testing/client.h>
 #include <mega/fuse/common/testing/cloud_path.h>
 #include <mega/fuse/common/testing/directory.h>
+#include <mega/fuse/common/testing/mount_event_observer.h>
 #include <mega/fuse/common/testing/path.h>
 #include <mega/fuse/common/testing/test.h>
 #include <mega/fuse/platform/platform.h>
@@ -24,7 +27,7 @@ struct FUSESyncTests
 class ScopedMount
 {
     Client& mClient;
-    NormalizedPath mPath;
+    std::string mName;
     MountResult mResult;
 
 public:
@@ -137,13 +140,13 @@ ScopedMount::ScopedMount(ClientPtr& client,
                          Path sourcePath,
                          CloudPath targetPath)
   : mClient(*client)
-  , mPath(sourcePath.localPath())
+  , mName(sourcePath.localPath().leafName().toPath(false))
   , mResult()
 {
     MountInfo info;
 
     // Describe our new mount.
-    info.mFlags.mName = mPath.leafName().toPath(false);
+    info.name(mName);
     info.mHandle = targetPath.resolve(mClient);
     info.mPath = sourcePath;
 
@@ -154,8 +157,25 @@ ScopedMount::ScopedMount(ClientPtr& client,
     if (mResult != MOUNT_SUCCESS)
         return;
 
+    // So we can wait until the mount is actually active.
+    auto observer = mClient.mountEventObserver();
+
+    observer->expect({
+        mName,
+        MOUNT_SUCCESS,
+        MOUNT_ENABLED
+    });
+
     // Try and enable mount.
-    mResult = mClient.enableMount(sourcePath, false);
+    mResult = mClient.enableMount(mName, false);
+
+    // Couldn't enable the mount.
+    if (mResult != MOUNT_SUCCESS)
+        return;
+
+    // Never received enabled event.
+    if (!observer->wait(Test::mDefaultTimeout))
+        mResult = MOUNT_UNEXPECTED;
 }
 
 ScopedMount::~ScopedMount()
@@ -165,14 +185,14 @@ ScopedMount::~ScopedMount()
         return;
 
     // Try and disable mount.
-    mResult = mClient.disableMount(mPath, false);
+    mResult = mClient.disableMount(mName, false);
 
     // Couldn't disable mount.
     if (mResult != MOUNT_SUCCESS)
         return;
 
     // Try and remove mount.
-    mResult = mClient.removeMount(mPath);
+    mResult = mClient.removeMount(mName);
 }
 
 MountResult ScopedMount::result() const

@@ -16,8 +16,7 @@ args = parser.parse_args()
 # Check for required environment variables
 required_env_vars = [
     "GITLAB_TOKEN",
-    "JIRA_USERNAME",
-    "JIRA_PASSWORD",
+    "JIRA_TOKEN",
     "SLACK_TOKEN",
     "GPG_KEYGRIP",
     "GPG_PASSWORD",
@@ -44,15 +43,17 @@ release.setup_local_repo(args["private_remote_name"], "", "")
 
 release.setup_project_management(
     args["jira_url"],
-    os.environ["JIRA_USERNAME"],
-    os.environ["JIRA_PASSWORD"],
+    os.environ["JIRA_TOKEN"],
 )
 
 slack_token = os.environ.get("SLACK_TOKEN", "")
 slack_channel_dev = args.get("slack_channel_dev_requests", "")
 slack_channel_announce = args.get("slack_channel_announce", "")
 if slack_token and (slack_channel_dev or slack_channel_announce):
-    release.setup_chat(slack_token, slack_channel_dev, slack_channel_announce)
+    slack_thread_announce = args.get("slack_thread_announce", "")
+    release.setup_chat(
+        slack_token, slack_channel_dev, slack_channel_announce, slack_thread_announce
+    )
 
 assert args["tickets"]
 
@@ -90,5 +91,8 @@ release.create_rc_tag(1)
 
 # STEP 10: step #8 from make_release: Slack:
 # Post release notes to Slack
-apps = [a.strip() for a in app_descr.split("/")]
-release.post_notes(apps)
+if args["target_apps"]:
+    apps = [a.strip() for a in args["target_apps"].split("/")]
+else:
+    apps = [a.strip() for a in app_descr.split("/")]
+release.post_notes(apps, releaseType="patchRelease")

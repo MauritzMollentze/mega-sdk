@@ -2,10 +2,13 @@
 #include <cassert>
 #include <stdexcept>
 
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
+#include <mega/common/scoped_query.h>
+#include <mega/common/transaction.h>
 #include <mega/fuse/common/any_lock.h>
 #include <mega/fuse/common/any_lock_set.h>
 #include <mega/fuse/common/client.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/inode.h>
 #include <mega/fuse/common/inode_id.h>
 #include <mega/fuse/common/logging.h>
@@ -14,10 +17,7 @@
 #include <mega/fuse/common/mount_event_type.h>
 #include <mega/fuse/common/mount_info.h>
 #include <mega/fuse/common/mount_result.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/ref.h>
-#include <mega/fuse/common/scoped_query.h>
-#include <mega/fuse/common/transaction.h>
 #include <mega/fuse/platform/mount.h>
 #include <mega/fuse/platform/mount_db.h>
 #include <mega/fuse/platform/service_context.h>
@@ -29,19 +29,21 @@ namespace mega
 namespace fuse
 {
 
+using namespace common;
+
 MountDB::Queries::Queries(Database& mDatabase)
   : mAddMount(mDatabase.query())
-  , mGetMountByPath(mDatabase.query())
-  , mGetMountFlagsByPath(mDatabase.query())
-  , mGetMountInodeByPath(mDatabase.query())
-  , mGetMountPathsByName(mDatabase.query())
-  , mGetMountStartupStateByPath(mDatabase.query())
+  , mGetMountByName(mDatabase.query())
+  , mGetMountFlagsByName(mDatabase.query())
+  , mGetMountInodeByName(mDatabase.query())
+  , mGetMountPathByName(mDatabase.query())
+  , mGetMountStartupStateByName(mDatabase.query())
   , mGetMounts(mDatabase.query())
   , mGetMountsEnabledAtStartup(mDatabase.query())
-  , mRemoveMountByPath(mDatabase.query())
+  , mRemoveMountByName(mDatabase.query())
   , mRemoveTransientMounts(mDatabase.query())
-  , mSetMountFlagsByPath(mDatabase.query())
-  , mSetMountStartupStateByPath(mDatabase.query())
+  , mSetMountFlagsByName(mDatabase.query())
+  , mSetMountStartupStateByName(mDatabase.query())
 {
     mAddMount = "insert into mounts values ( "
                 "  :enable_at_startup, "
@@ -52,54 +54,54 @@ MountDB::Queries::Queries(Database& mDatabase)
                 "  :read_only "
                 ")";
 
-    mGetMountByPath = "select * from mounts where path = :path";
+    mGetMountByName = "select * from mounts where name = :name";
 
-    mGetMountFlagsByPath = "select enable_at_startup "
+    mGetMountFlagsByName = "select enable_at_startup "
                            "     , name "
                            "     , persistent "
                            "     , read_only "
                            "  from mounts "
-                           " where path = :path";
+                           " where name = :name";
 
-    mGetMountInodeByPath = "select id from mounts where path = :path";
+    mGetMountInodeByName = "select id from mounts where name = :name";
 
-    mGetMountPathsByName = "select path from mounts where name = :name";
+    mGetMountPathByName = "select path from mounts where name = :name";
 
-    mGetMountStartupStateByPath = "select enable_at_startup "
+    mGetMountStartupStateByName = "select enable_at_startup "
                                   "     , persistent "
                                   "  from mounts "
-                                  " where path = :path";
+                                  " where name = :name";
 
     mGetMounts = "select * from mounts";
 
-    mGetMountsEnabledAtStartup = "select path "
+    mGetMountsEnabledAtStartup = "select name "
                                  "  from mounts "
                                  " where enable_at_startup = true "
                                  "   and persistent = true";
 
-    mRemoveMountByPath = "delete from mounts where path = :path";
+    mRemoveMountByName = "delete from mounts where name = :name";
 
     mRemoveTransientMounts = "delete from mounts where persistent = false";
 
-    mSetMountFlagsByPath = "update mounts "
+    mSetMountFlagsByName = "update mounts "
                            "   set enable_at_startup = :enable_at_startup "
                            "     , name = :name "
                            "     , persistent = :persistent "
                            "     , read_only = :read_only "
-                           " where path = :path";
+                           " where name = :current_name";
 
-    mSetMountStartupStateByPath =
+    mSetMountStartupStateByName =
       "update mounts "
       "   set enable_at_startup = :enable_at_startup "
       "     , persistent = :persistent "
-      " where path = :path";
+      " where name = :name";
 }
 
 MountResult MountDB::check(const MountInfo& info)
 {
     // Convenience.
     auto& handle = info.mHandle;
-    auto& name = info.mFlags.mName;
+    auto& name = info.name();
 
     // User's specified a bogus node handle.
     if (handle.isUndef())
@@ -159,11 +161,11 @@ void MountDB::doDeinitialize()
 void MountDB::enable()
 try
 {
-    mContext.mInodeDB.current();
-    mContext.mFileCache.current();
+    inodeDB().current();
+    fileCache().current();
 
     // What mounts should we try and enable?
-    std::vector<LocalPath> mounts;
+    std::vector<std::string> mounts;
 
     // Compute list of mounts to enable.
     {
@@ -175,31 +177,30 @@ try
         // What mounts should be enabled at startup?
         query.execute();
 
-        // Collect paths of enabled mounts.
+        // Collect names of enabled mounts.
         for ( ; query; ++query)
-            mounts.emplace_back(query.field("path"));
+            mounts.emplace_back(query.field("name").get<std::string>());
     }
 
     // Try and enable each mount.
-    for (auto& path : mounts)
+    for (auto& name : mounts)
     {
         MountEvent event;
 
-        event.mPath = path;
+        event.mName = name;
         event.mType = MOUNT_ENABLED;
 
         // Try and enable the mount.
-        event.mResult = enable(path, false);
-
-        // Emit event.
-        client().emitEvent(event);
+        event.mResult = enable(name, false);
 
         // Couldn't enable the mount.
         if (event.mResult != MOUNT_SUCCESS)
         {
             FUSEWarningF("Unable to enable persistent mount \"%s\" due to error: %s",
-                         path.toPath(false).c_str(),
+                         name.c_str(),
                          toString(event.mResult));
+
+            emitEvent(client(), event);
 
             // Try and enable the next mount.
             continue;
@@ -207,7 +208,7 @@ try
 
         // Mount's been enabled.
         FUSEInfoF("Successfully enabled persistent mount \"%s\"",
-                  path.toPath(false).c_str());
+                  name.c_str());
     }
 }
 catch (std::runtime_error& exception)
@@ -379,15 +380,15 @@ try
     auto guard = lockAll(mContext.mDatabase, *this);
 
     auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mGetMountInodeByPath);
+    auto query = transaction.query(mQueries.mGetMountInodeByName);
 
-    // Make sure the path isn't already associated with a mount.
-    query.param(":path") = info.mPath;
+    // Make sure the name isn't already associated with a mount.
+    query.param(":name").set(info.name());
     query.execute();
 
-    // A mount's already associated with this path.
+    // A mount's already associated with this name.
     if (query)
-        return MOUNT_EXISTS;
+        return MOUNT_NAME_TAKEN;
 
     // Add the description to the database.
     query = transaction.query(mQueries.mAddMount);
@@ -421,9 +422,8 @@ void MountDB::current()
     MountDBLock guard(*this);
 
     // Calls our current handler.
-    auto current = [this](Activity& activity,
-                          void (MountDB::*onCurrent)(),
-                          const Task& task) {
+    auto current = [this](Activity&, void (MountDB::*onCurrent)(), const Task& task)
+    {
         // Task hasn't been cancelled.
         if (!task.cancelled())
             (this->*onCurrent)();
@@ -494,18 +494,18 @@ MountInfoPtr MountDB::contains(const LocalPath& path,
         *relativePath = path.subpathFrom(index);
 
     // Return description to caller.
-    return std::make_unique<MountInfo>(std::move(*mount));
+    return std::make_unique<MountInfo>(*mount);
 }
 
 void MountDB::disable(MountDisabledCallback callback,
-                      const LocalPath& path,
+                      const std::string& name,
                       bool remember)
 {
     auto guard = lockAll(mContext.mDatabase, *this);
 
     MountEvent event;
 
-    event.mPath = path;
+    event.mName = name;
     event.mType = MOUNT_DISABLED;
 
     // Emits the event and queues callback for execution.
@@ -514,7 +514,7 @@ void MountDB::disable(MountDisabledCallback callback,
         event.mResult = result;
 
         // Emit the event.
-        client().emitEvent(event);
+        fuse::emitEvent(client(), event);
 
         // Forward result to callback.
         auto wrapper = [result](MountDisabledCallback& callback,
@@ -532,41 +532,40 @@ void MountDB::disable(MountDisabledCallback callback,
     try
     {
         auto transaction = mContext.mDatabase.transaction();
-        auto query = transaction.query(mQueries.mGetMountStartupStateByPath);
+        auto query = transaction.query(mQueries.mGetMountStartupStateByName);
 
         // Query the mount's startup state.
-        query.param(":path") = path;
+        query.param(":name").set(name);
         query.execute();
 
         // No mount associated with specified path.
         if (!query)
         {
-            FUSEErrorF("No mount associated with path: %s",
-                       path.toPath(false).c_str());
+            FUSEErrorF("No mount associated with name: %s", name.c_str());
 
             return emitEvent(MOUNT_UNKNOWN);
         }
 
         // Latch startup state.
-        bool enableAtStartup = query.field("enable_at_startup");
-        bool persistent = query.field("persistent");
+        bool enableAtStartup = query.field("enable_at_startup").get<bool>();
+        bool persistent = query.field("persistent").get<bool>();
 
         enableAtStartup = enableAtStartup && !remember;
         persistent = persistent || remember;
 
         // Update the mount's startup state.
-        query = transaction.query(mQueries.mSetMountStartupStateByPath);
+        query = transaction.query(mQueries.mSetMountStartupStateByName);
 
-        query.param(":enable_at_startup") = enableAtStartup;
-        query.param(":path") = path;
-        query.param(":persistent") = persistent;
+        query.param(":enable_at_startup").set(enableAtStartup);
+        query.param(":name").set(name);
+        query.param(":persistent").set(persistent);
 
         query.execute();
 
         transaction.commit();
 
         // Is the mount currently enabled?
-        auto mount = this->mount(path);
+        auto mount = this->mount(name);
 
         // Mount's not enabled: We're done.
         if (!mount)
@@ -589,7 +588,7 @@ void MountDB::disable(MountDisabledCallback callback,
     {
         // Unexpected error while disabling mount.
         FUSEErrorF("Unable to disable mount %s: %s",
-                   path.toPath(false).c_str(),
+                   name.c_str(),
                    exception.what());
 
         emitEvent(MOUNT_UNEXPECTED);
@@ -670,27 +669,35 @@ void MountDB::each(std::function<void(platform::Mount&)> function)
         function(*mount);
 }
 
-MountResult MountDB::enable(const LocalPath& path, bool remember)
+MountResult MountDB::enable(const std::string& name, bool remember)
 try
 {
     auto lock = lockAll(mContext.mDatabase, *this);
 
     // The mount associated with this path is already enabled.
-    if (mount(path))
-        return MOUNT_SUCCESS;
+    //
+    // NOTE: We're calling enabled() manually to force the generation of a
+    // MOUNT_ENABLED event. This is necessary because we want to generate
+    // this event whenever enabling a mount succeeds but normally, a mount
+    // will only generate the event when it becomes functional.
+    //
+    // That is, when you enable a mount that's already enabled, it's not
+    // transitioning into a functional state so, we have to generate the
+    // event manually.
+    if (auto mount = this->mount(name))
+        return mount->enabled(), MOUNT_SUCCESS;
 
     auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mGetMountByPath);
+    auto query = transaction.query(mQueries.mGetMountByName);
 
     // Check if the mount's present in the database.
-    query.param(":path") = path;
+    query.param(":name").set(name);
     query.execute();
 
     // Mount's not in the database.
     if (!query)
     {
-        FUSEErrorF("No mount associated with path: %s",
-                   path.toPath(false).c_str());
+        FUSEErrorF("No mount associated with name: %s", name.c_str());
 
         return MOUNT_UNKNOWN;
     }
@@ -705,11 +712,11 @@ try
     flags.mPersistent |= remember;
 
     // Update the mount's startup state.
-    query = transaction.query(mQueries.mSetMountStartupStateByPath);
+    query = transaction.query(mQueries.mSetMountStartupStateByName);
 
-    query.param(":enable_at_startup") = flags.mEnableAtStartup;
-    query.param(":path") = path;
-    query.param(":persistent") = flags.mPersistent;
+    query.param(":enable_at_startup").set(flags.mEnableAtStartup);
+    query.param(":name").set(name);
+    query.param(":persistent").set(flags.mPersistent);
 
     query.execute();
 
@@ -725,25 +732,41 @@ try
     auto result = check(info);
 
     // Description's no longer sane.
-    if (result != MOUNT_SUCCESS)
+    //
+    // The reason we don't bail on LOCAL_EXISTS is that this
+    // error will always be signaled when you try to enable
+    // multiple mounts that use the same path. It'd also be
+    // generated in some cases if multiple threads tried to
+    // enable the same mount at the same time.
+    //
+    // So, instead of bailing here, bail later if needed. That
+    // way, we can check if the mount's already been enabled and
+    // return success. Or, if two distinct mounts with the same
+    // path are being enabled, we can return a more meaningful
+    // LOCAL_TAKEN error below.
+    if (result != MOUNT_SUCCESS && result != MOUNT_LOCAL_EXISTS)
         return result;
 
     // Reacquire the lock.
     lock.lock();
 
     // Another thread's enabled the mount.
-    if (auto mount = this->mount(info.mPath))
+    if (auto mount = this->mount(name))
         return MOUNT_SUCCESS;
 
-    // Another thread's enabled a mount with the same name.
-    if (auto mount = this->mount(info.mFlags.mName))
+    // Another thread's enabled a mount with the same path.
+    if (auto mount = this->mount(info.mPath))
     {
-        FUSEErrorF("Name %s already taken by mount: %s",
-                   info.mFlags.mName.c_str(),
-                   mount->path().toPath(false).c_str());
+        FUSEErrorF("Path %s already taken by mount: %s",
+                   info.mPath.toPath(false).c_str(),
+                   mount->name().c_str());
 
-        return MOUNT_NAME_TAKEN;
+        return MOUNT_LOCAL_TAKEN;
     }
+    
+    // Mount path might already exist on disk.
+    if (result != MOUNT_SUCCESS)
+        return result;
 
     // Convenience.
     auto& self = static_cast<platform::MountDB&>(*this);
@@ -753,14 +776,14 @@ try
 
     // Add the mount to the index.
     mByHandle[info.mHandle].emplace(mount);
-    mByName[flags.mName] = mount;
-    mByPath[path] = mount;
+    mByName[name] = mount;
+    mByPath[mount->path()] = mount;
 
     // Release lock.
     lock.unlock();
 
-    // Let the mount know it's been enabled.
-    mount->enabled();
+    // Flush any files modified by this mount.
+    fileCache().flush(*mount, inodeDB().modified(mount->handle()));
 
     // Mount's enabled.
     return MOUNT_SUCCESS;
@@ -769,19 +792,19 @@ catch (std::runtime_error& exception)
 {
     // Unexpected error while enabling mount.
     FUSEErrorF("Unable to enable mount %s: %s",
-               path.toPath(false).c_str(),
+               name.c_str(),
                exception.what());
 
     return MOUNT_UNEXPECTED;
 }
 
-bool MountDB::enabled(const LocalPath& path) const
+bool MountDB::enabled(const std::string& name) const
 {
     // Acquire lock.
     MountDBLock guard(*this);
 
     // Is a mount with this path enabled?
-    return mByPath.count(path) > 0;
+    return mByName.count(name) > 0;
 }
 
 void MountDB::executorFlags(const TaskExecutorFlags& flags)
@@ -796,7 +819,12 @@ TaskExecutorFlags MountDB::executorFlags() const
     return mContext.serviceFlags().mMountExecutorFlags;
 }
 
-MountResult MountDB::flags(const LocalPath& path,
+FileCache& MountDB::fileCache()
+{
+    return mContext.mFileCache;
+}
+
+MountResult MountDB::flags(const std::string& currentName,
                            const MountFlags& flags)
 try
 {
@@ -810,33 +838,31 @@ try
         return MOUNT_NO_NAME;
     }
 
-    // Is the mount enabled?
-    auto mount = this->mount(path);
+    auto transaction = mContext.mDatabase.transaction();
+    auto query = transaction.query(mQueries.mGetMountByName);
 
-    // Mount's enabled.
-    if (mount)
+    // Make sure the mount's new name, if any, is unique.
+    if (currentName != flags.mName)
     {
-        // Is this name already taken by another mount?
-        auto other = this->mount(flags.mName);
+        query.param(":name").set(flags.mName);
+        query.execute();
 
-        // Name's taken by another enabled mount.
-        if (other && other != mount)
+        // Mount's new name isn't unique.
+        if (query)
         {
-            FUSEErrorF("Name %s already taken by mount: %s",
-                       flags.mName.c_str(),
-                       other->path().toPath(false).c_str());
+            FUSEErrorF("Name \"%s\" already taken by another mount.",
+                       flags.mName.c_str());
 
             return MOUNT_NAME_TAKEN;
         }
     }
 
     // Update the mount's flags.
-    auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mSetMountFlagsByPath);
+    query = transaction.query(mQueries.mSetMountFlagsByName);
 
     flags.serialize(query);
 
-    query.param(":path") = path;
+    query.param(":current_name").set(currentName);
     query.execute();
 
     // No mount is associated with this path.
@@ -844,15 +870,13 @@ try
         return MOUNT_UNKNOWN;
 
     // Mount's enabled.
-    if (mount)
+    if (auto mount = this->mount(currentName))
     {
-        auto name = mount->name();
-
         // Keep mount consistent with the database.
         mount->flags(flags);
 
         // Keep the by-name index up to date.
-        mByName.erase(name);
+        mByName.erase(currentName);
         mByName.emplace(flags.mName, mount);
     }
 
@@ -865,26 +889,26 @@ catch (std::runtime_error& exception)
 {
     // Unexpected error while updating the mount's flags.
     FUSEErrorF("Unable to update flags for mount %s: %s",
-               path.toPath(false).c_str(),
+               currentName.c_str(),
                exception.what());
 
     return MOUNT_UNEXPECTED;
 }
 
-MountFlagsPtr MountDB::flags(const LocalPath& path) const
+MountFlagsPtr MountDB::flags(const std::string& name) const
 try
 {
     auto guard = lockAll(mContext.mDatabase, *this);
 
     // Fast path: Mount's enabled and in memory.
-    if (auto mount = this->mount(path))
+    if (auto mount = this->mount(name))
         return std::make_unique<MountFlags>(mount->flags());
 
     // Retrieve mount's flags from the database.
     auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mGetMountFlagsByPath);
+    auto query = transaction.query(mQueries.mGetMountFlagsByName);
 
-    query.param(":path") = path;
+    query.param(":name").set(name);
     query.execute();
 
     // No mount's associated with the specified path.
@@ -901,26 +925,26 @@ catch (std::runtime_error& exception)
 {
     // Unexpected error while retrieving the mount's flags.
     FUSEErrorF("Unable to retrieve flags for mount %s: %s",
-               path.toPath(false).c_str(),
+               name.c_str(),
                exception.what());
 
     return nullptr;
 }
 
-MountInfoPtr MountDB::get(const LocalPath& path) const
+MountInfoPtr MountDB::get(const std::string& name) const
 try
 {
     auto guard = lockAll(mContext.mDatabase, *this);
 
     // Fast path: Mount's enabled and in memory.
-    if (auto mount = this->mount(path))
+    if (auto mount = this->mount(name))
         return std::make_unique<MountInfo>(mount->info());
 
     // Retrieve the mount's description from the database.
     auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mGetMountByPath);
+    auto query = transaction.query(mQueries.mGetMountByName);
 
-    query.param(":path") = path;
+    query.param(":name").set(name);
     query.execute();
 
     // No mount associated with the specified path.
@@ -937,29 +961,35 @@ catch (std::runtime_error& exception)
 {
     // Unexpected error while retrieving the mount's description.
     FUSEErrorF("Unable to retrieve information for mount %s: %s",
-               path.toPath(false).c_str(),
+               name.c_str(),
                exception.what());
 
     return nullptr;
 }
 
-MountInfoVector MountDB::get(bool enabled) const
+MountInfoVector MountDB::get(bool onlyEnabled) const
 try
 {
     auto guard = lockAll(mContext.mDatabase, *this);
 
-    MountInfoVector mounts;
+    MountInfoSet<MountInfoNameLess> mounts;
+
+    // Copy descriptions of enabled mounts.
+    //
+    // Note that we do this even when onlyEnabled is false.
+    //
+    // The reason is that some mounts may only have a defined path when they
+    // are enabled and we want to provide that path to the caller when
+    // possible.
+    //
+    // We rely on the set above to prevent entries from the database from
+    // overwriting what we've retrieved from memory.
+    for (auto& i : mByPath)
+        mounts.emplace(i.second->info());
 
     // Caller's interested only in mounts that are enabled.
-    if (enabled)
-    {
-        // Copy descriptions of enabled mounts.
-        for (auto& i : mByPath)
-            mounts.emplace_back(i.second->info());
-
-        // And return them to the caller.
-        return mounts;
-    }
+    if (onlyEnabled)
+        return MountInfoVector(mounts.begin(), mounts.end());
 
     // Retrieve descriptions of all known mounts from the database.
     auto transaction = mContext.mDatabase.transaction();
@@ -969,10 +999,10 @@ try
 
     // Deserialize each description.
     for ( ; query; ++query)
-        mounts.emplace_back(MountInfo::deserialize(query));
+        mounts.emplace(MountInfo::deserialize(query));
 
     // And return them all to the caller.
-    return mounts;
+    return MountInfoVector(mounts.begin(), mounts.end());
 }
 catch (std::runtime_error& exception)
 {
@@ -983,22 +1013,29 @@ catch (std::runtime_error& exception)
     return MountInfoVector();
 }
 
-NormalizedPathVector MountDB::paths(const std::string& name) const
+InodeDB& MountDB::inodeDB()
+{
+    return mContext.mInodeDB;
+}
+
+NormalizedPath MountDB::path(const std::string& name) const
 try
 {
     auto guard = lockAll(mContext.mDatabase, *this);
 
-    auto paths = NormalizedPathVector();
-    auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mGetMountPathsByName);
+    if (auto mount = this->mount(name))
+        return mount->path();
 
-    query.param(":name") = name;
+    auto transaction = mContext.mDatabase.transaction();
+    auto query = transaction.query(mQueries.mGetMountPathByName);
+
+    query.param(":name").set(name);
     query.execute();
 
-    for ( ; query; ++query)
-        paths.emplace_back(query.field("path"));
+    if (query && !query.field("path").null())
+        return query.field("path").get<LocalPath>();
 
-    return paths;
+    return NormalizedPath();
 }
 catch (std::runtime_error& exception)
 {
@@ -1006,7 +1043,7 @@ catch (std::runtime_error& exception)
                name.c_str(),
                exception.what());
 
-    return NormalizedPathVector();
+    return NormalizedPath();
 }
 
 MountResult MountDB::prune()
@@ -1029,23 +1066,22 @@ catch (std::runtime_error& exception)
     return MOUNT_UNEXPECTED;
 }
 
-MountResult MountDB::remove(const LocalPath& path)
+MountResult MountDB::remove(const std::string& name)
 try
 {
     auto guard = lockAll(mContext.mDatabase, *this);
 
-    if (mByPath.count(path))
+    if (mByName.count(name))
     {
-        FUSEErrorF("Can't remove an enabled mount: %s",
-                   path.toPath(false).c_str());
+        FUSEErrorF("Can't remove an enabled mount: %s", name.c_str());
 
         return MOUNT_BUSY;
     }
 
     auto transaction = mContext.mDatabase.transaction();
-    auto query = transaction.query(mQueries.mRemoveMountByPath);
+    auto query = transaction.query(mQueries.mRemoveMountByName);
 
-    query.param(":path") = path;
+    query.param(":name").set(name);
     query.execute();
 
     transaction.commit();
@@ -1055,7 +1091,7 @@ try
 catch (std::runtime_error& exception)
 {
     FUSEErrorF("Unable to remove mount %s: %s",
-               path.toPath(false).c_str(),
+               name.c_str(),
                exception.what());
 
     return MOUNT_UNEXPECTED;

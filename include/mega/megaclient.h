@@ -41,17 +41,21 @@
 #include "sharenodekeys.h"
 #include "sync.h"
 #include "transfer.h"
+#include "transferstats.h"
 #include "treeproc.h"
 #include "user.h"
 #include "useralerts.h"
 
 // FUSE support.
-#include <mega/fuse/common/client_adapter.h>
+#include <mega/common/client_adapter.h>
 #include <mega/fuse/common/service.h>
+
+#include <optional>
 
 namespace mega {
 
 class Logger;
+struct NetworkConnectivityTestResults;
 
 class MEGA_API FetchNodesStats
 {
@@ -325,7 +329,7 @@ public:
     void setPrivRSA(std::string privRSA);
     std::string getPrivRSA();
     bool promotePendingShares();
-    bool isUnverifiedOutShare(handle nodeHandle, const string& uid);
+    bool isUnverifiedOutShare(handle nodeHandle, const string& uid) const;
     bool isUnverifiedInShare(handle nodeHandle, handle userHandle);
 
     void loadShareKeys();
@@ -500,6 +504,7 @@ struct DynamicMessageNotification
     bool showBanner = false;
     std::map<std::string, std::string> callToAction1;
     std::map<std::string, std::string> callToAction2;
+    std::map<std::string, std::map<std::string, std::string>> renderModes;
 };
 
 class MEGA_API MegaClient
@@ -689,16 +694,18 @@ public:
     void killallsessions();
 
     // extract public handle and key from a public file/folder link
-    error parsepubliclink(const char *link, handle &ph, byte *key, TypeOfLink type);
+    error parsepubliclink(const char* link, handle& ph, byte* extractedKey, TypeOfLink type);
 
     // open the SC database and get the SCSN from it
     void checkForResumeableSCDatabase();
 
     // set folder link: node, key. authKey is the authentication key to be able to write into the folder
-    error folderaccess(const char*folderlink, const char* authKey);
+    error folderaccess(const char* folderlink,
+                       const char* authKey,
+                       const bool tryToResumeFolderLinkFromCache = false);
 
     // open exported file link (op=0 -> download, op=1 fetch data)
-    void openfilelink(handle ph, const byte *key);
+    void openfilelink(handle ph, const byte* fileKey);
 
     // decrypt password-protected public link
     // the caller takes the ownership of the returned value in decryptedLink parameter
@@ -762,6 +769,7 @@ public:
     static constexpr char NODE_ATTRIBUTE_DESCRIPTION[] = "des";
     static constexpr char NODE_ATTRIBUTE_TAGS[] = "t";
     static constexpr char NODE_ATTR_SEN[] = "sen";
+    static constexpr char NODE_ATTR_LABEL[] = "lbl";
     static constexpr char TAG_DELIMITER = NodeSearchFilter::TAG_DELIMITER;
     static constexpr uint32_t MAX_NUMBER_TAGS = 10;
     static constexpr uint32_t MAX_TAGS_SIZE = 3000;
@@ -776,6 +784,35 @@ public:
     static void makeattr(SymmCipher*, const std::unique_ptr<string>&, const char*, int = -1);
 
     error addTagToNode(std::shared_ptr<Node> node, const std::string& tag, CommandSetAttr::Completion&& c);
+    static std::vector<std::string> getNodeTags(const std::string& delimitedTags);
+    std::vector<std::string> getNodeTags(std::shared_ptr<Node> node);
+
+    /*
+     * @brief
+     * Get all node tags below a specified node.
+     *
+     * @param cancelToken
+     * A token that can be used to terminate the query's execution prematurely.
+     *
+     * @param handle
+     * A handle specifying which node we want to list tags below.
+     *
+     * If undefined, the query will list tags below all root nodes.
+     *
+     * @param pattern
+     * An optional pattern that can be used to filter which tags we list.
+     *
+     * @returns
+     * std::nullopt on failure.
+     * std::set<std::string> on success.
+     */
+    auto getNodeTagsBelow(CancelToken cancelToken,
+                          NodeHandle handle,
+                          const std::string& pattern = {}) -> std::optional<std::set<std::string>>;
+
+    auto getNodeTagsBelow(NodeHandle handle, const std::string& pattern = {})
+        -> std::optional<std::set<std::string>>;
+
     error removeTagFromNode(std::shared_ptr<Node> node, const std::string& tag, CommandSetAttr::Completion&& c);
     error updateTagNode(std::shared_ptr<Node>, const std::string& newTag, const std::string& oldTag, CommandSetAttr::Completion&& c);
 
@@ -823,7 +860,7 @@ public:
     void pausexfers(direction_t, bool pause, bool hard, TransferDbCommitter& committer);
 
     // maximum number of connections per transfer
-    static const unsigned MAX_NUM_CONNECTIONS = 6;
+    static const unsigned MAX_NUM_CONNECTIONS = 100;
 
     // set max connections per transfer
     void setmaxconnections(direction_t, int);
@@ -835,8 +872,28 @@ public:
     void setBlocked(bool value);
 
     // enqueue/abort direct read
+    void pread(Node*, m_off_t, m_off_t, DirectRead::Callback&& callback);
+    void pread(handle,
+               SymmCipher* cypher,
+               int64_t,
+               m_off_t,
+               m_off_t,
+               DirectRead::Callback&& callback,
+               bool = false,
+               const char* = NULL,
+               const char* = NULL,
+               const char* = NULL);
     void pread(Node*, m_off_t, m_off_t, void*);
-    void pread(handle, SymmCipher* key, int64_t, m_off_t, m_off_t, void*, bool = false,  const char* = NULL, const char* = NULL, const char* = NULL);
+    void pread(handle,
+               SymmCipher* cypher,
+               int64_t,
+               m_off_t,
+               m_off_t,
+               void*,
+               bool = false,
+               const char* = NULL,
+               const char* = NULL,
+               const char* = NULL);
     void preadabort(Node*, m_off_t = -1, m_off_t = -1);
     void preadabort(handle, m_off_t = -1, m_off_t = -1);
 
@@ -877,7 +934,7 @@ public:
     void putFileAttributes(handle h, fatype t, const std::string& encryptedAttributes, int tag);
 
     // attach file attribute to upload or node handle
-    bool putfa(NodeOrUploadHandle, fatype, SymmCipher*, int tag, std::unique_ptr<string>);
+    error putfa(NodeOrUploadHandle, fatype, SymmCipher*, int tag, std::unique_ptr<string>);
 
     // move as many as possible from pendingfa to activefa
     void activatefa();
@@ -887,6 +944,15 @@ public:
 
     // notify delayed upload completion subsystem about new file attribute
     void checkfacompletion(UploadHandle, Transfer* = NULL, bool uploadCompleted = false);
+
+    // attach/update/delete a user attribute using encryption
+    void putua(attr_t at,
+               string_map&& records,
+               int ctag = -1,
+               handle lastPublicHandle = UNDEF,
+               int phtype = 0,
+               int64_t ts = 0,
+               std::function<void(Error)> completion = nullptr);
 
     // attach/update/delete a user attribute
     void putua(attr_t at, const byte* av = NULL, unsigned avl = 0, int ctag = -1, handle lastPublicHandle = UNDEF, int phtype = 0, int64_t ts = 0,
@@ -902,7 +968,7 @@ public:
     void getua(const char* email_handle, const attr_t at = ATTR_UNKNOWN, const char *ph = NULL, int ctag = -1, CommandGetUA::CompletionErr ce = nullptr, CommandGetUA::CompletionBytes cb = nullptr, CommandGetUA::CompletionTLV ctlv = nullptr);
 
     // retrieve the email address of a user
-    void getUserEmail(const char *uid);
+    void getUserEmail(const char* userID);
 
     // Set email for an user
     void setEmail(User* u, const std::string& email);
@@ -923,6 +989,7 @@ public:
     // queue a user attribute removal
     void delua(const char* an);
 
+#endif
     // send dev command for testing
     void senddevcommand(const char* command,
                         const char* email,
@@ -930,7 +997,6 @@ public:
                         int bs = 0,
                         int us = 0,
                         const char* abs_c = nullptr);
-#endif
 
     // delete or block an existing contact
     error removecontact(const char*, visibility_t = HIDDEN, CommandRemoveContact::Completion completion = nullptr);
@@ -976,32 +1042,154 @@ public:
 
 #ifdef ENABLE_SYNC
     /**
-     * @brief is node syncable
-     * @param isinshare filled with whether the node is within an inshare.
-     * @param syncError filled with SyncError with the sync error that makes the node unsyncable
-     * @return API_OK if syncable. (regular) error otherwise
+     * @brief Check if a given node is syncable
+     * @param remotenode We want to validate if a sync can be enabled using this node as remote
+     * root.
+     * @param excludeSelf if true, we will asume the given node is already the root of a sync and we
+     * want to validate if it can still be synced. In other words, while iterating active syncs we
+     * will scape the one having remotenode as root.
+     * @return A std::pair with information about the API and Sync errors. API_OK, NO_SYNC_ERROR if
+     * the node is syncable.
      */
-    error isnodesyncable(std::shared_ptr<Node>, bool * isinshare = NULL, SyncError *syncError = nullptr);
+    std::pair<error, SyncError> isnodesyncable(std::shared_ptr<Node> remotenode,
+                                               const bool excludeSelf = false);
 
     /**
-     * @brief is local path syncable
-     * @param newPath path to check
-     * @param excludeBackupId backupId to exclude in checking (that of the new sync)
-     * @param syncError filled with SyncError with the sync error that makes the node unsyncable
-     * @return API_OK if syncable. (regular) error otherwise
+     * @brief Checks if the given remotenode is related with any active sync
+     *
+     * @param remotenode The node to check
+     * @param excludeSelf if true, we will asume the given node is already the root of an active
+     * sync. This sync will be skipped during the evaluation.
+     * @return NO_SYNC_ERROR if the given node is not related with any of the active syncs.
+     * Otherwise:
+     *   - ACTIVE_SYNC_SAME_PATH: If the given node is already the root of an active sync
+     *   - ACTIVE_SYNC_BELOW_PATH: If the given node contains an active sync
+     *   - ACTIVE_SYNC_ABOVE_PATH: If the given node is contained in an active sync
      */
-    error isLocalPathSyncable(const LocalPath& newPath, handle excludeBackupId = UNDEF, SyncError *syncError = nullptr);
+    SyncError anyActiveSyncAboveOrBelow(const Node& remotenode, const bool excludeSelf);
 
     /**
-     * @brief check config. Will fill syncError in the SyncConfig in case there is one.
-     * Will fill syncWarning in the SyncConfig in case there is one.
-     * Does not persist the sync configuration.
-     * Does not add the syncConfig.
-     * Reference parameters are filled in while checking syncConfig, for the benefit of addSync() which calls it.
-     * @return And error code if there are problems serious enough with the syncconfig that it should not be added.
-     *         Otherwise, API_OK
+     * @brief Checks whether the current user has full access to the given node.
+     *
+     * This will be always the case for nodes that are not part of an inbound shared node. If the
+     * node is or is contained in an inbound shared node, this function checks that the user has
+     * full access to the node being shared.
+     *
+     * @param remotenode The node to check
+     * @return true if the current user has full access to the node, false otherwise
      */
-    error checkSyncConfig(SyncConfig& syncConfig, LocalPath& rootpath, std::unique_ptr<FileAccess>& openedLocalFolder, bool& inshare, bool& isnetwork);
+    bool userHasRestrictedAccessToNode(const Node& remotenode);
+
+    /**
+     * @brief Checks if a local path is suitable for synchronization without conflicting with
+     * existing syncs.
+     *
+     * This method determines whether the provided `newPath` can be used for a new synchronization
+     * task. It ensures that the path does not overlap with any existing active sync configurations,
+     * thereby preventing conflicts arising from nested or overlapping sync directories.
+     *
+     * @param newPath The local path to be checked for sync compatibility.
+     * @param excludeBackupId A backup ID to exclude from the check. This is useful when
+     * updating an existing sync, allowing it to bypass itself during the validation. Pass `UNDEF`
+     * if you don't want to skip any sync during the validation.
+     *
+     * @return A `std::pair` containing:
+     * - `error`: An error code indicating the result of the check.
+     * - `SyncError`: A detailed sync error code providing more context.
+     *
+     * The possible returned error combinations are:
+     *   - `API_OK`:
+     *      + `NO_SYNC_ERROR` if the path is syncable and does not conflict with existing syncs.
+     *   - `API_EARGS`:
+     *      + `LOCAL_PATH_UNAVAILABLE` if the provided `newPath` is empty.
+     *      + `LOCAL_PATH_SYNC_COLLISION` if the path conflicts with an existing sync path.
+     *
+     * @warning
+     * - The function does not verify the existence or accessibility of the `newPath`; it only
+     * checks for path conflicts.
+     * - Symbolic links are not resolved; the check is purely lexical based on the expanded paths.
+     */
+    std::pair<error, SyncError> isLocalPathSyncable(const LocalPath& newPath,
+                                                    const handle excludeBackupId) const;
+
+    /**
+     * @brief Validates if the local path in a SyncConfig is suitable as a synchronization root.
+     *
+     * It performs several validations, including:
+     * - Ensuring the path is not above or below a FUSE mount point.
+     * - Verifying that the filesystem supports synchronization.
+     * - Confirming the path exists, is accessible, and is a directory.
+     * - Checking for conflicts with existing sync configurations to prevent overlapping sync areas.
+     *
+     * @param rootPath The path to validate
+     * @param excludeBackupId A backup ID to exclude from the check done by the
+     * `isLocalPathSyncable` method. This is useful when updating an existing sync, allowing it to
+     * bypass itself during the validation. Pass `UNDEF` if you don't want to skip any sync during
+     * the validation.
+     *
+     * @return A SyncErrorInfo, i.e., a `std::tuple` containing:
+     * - `error`: An error code indicating the result of the check.
+     * - `SyncError`: A detailed sync error code providing more context.
+     * - `SyncWarning`: A sync warning code returned by `FileSystemAccess::issyncsupported`.
+     *
+     * The possible returned error combinations are:
+     *   - `API_OK`:
+     *      + `NO_SYNC_ERROR` if the path is a valid root for a sync.
+     *   - `API_EARGS`:
+     *      + `NO_SYNC_ERROR` if the given path is not absolute.
+     *      + `LOCAL_PATH_UNAVAILABLE` if the provided `newPath` is empty.
+     *      + `LOCAL_PATH_SYNC_COLLISION` if the path conflicts with an existing sync path.
+     * - `API_EFAILED`:
+     *      + `LOCAL_PATH_MOUNTED` if the path is above or below a FUSE mount point
+     *      + `UNSUPPORTED_FILE_SYSTEM` if the filesystem is unsupported.
+     * - `API_ETEMPUNAVAIL`:
+     *      + `LOCAL_PATH_TEMPORARY_UNAVAILABLE` if the local path is temporarily unavailable.
+     * - `API_ENOENT`:
+     *      + `LOCAL_PATH_UNAVAILABLE` if the local path cannot be accessed.
+     * - `API_EACCESS`:
+     *      + `INVALID_LOCAL_TYPE` if the path is not a directory.
+     */
+    SyncErrorInfo isValidLocalSyncRoot(const LocalPath& rootPath,
+                                       const handle backupIdToExclude) const;
+
+    /**
+     * @brief Check if a SyncConfig could be used to create a sync
+     *
+     * This function performs a series of checks to determine whether the provided `SyncConfig` is
+     * valid and can be used to initiate synchronization.
+     *
+     * The validation includes:
+     * - Ensuring the remote node exists and is suitable for syncing. This includes checks for
+     *   nested-syncs, which are not allowed.
+     * - Verifying the local path is accessible, is a directory, and is on a supported filesystem.
+     *   Also nested syncs checks are carried out.
+     * - Checking for account-related issues such as over-storage, expiration, or blockage.
+     * - Handling specific conditions for backups, external drives, and periodic scanning modes.
+     *
+     * @param syncConfig The `SyncConfig` to validate. May be modified with error or warning
+     * details.
+     *
+     * @return A SyncErrorInfo, i.e., a `std::tuple` containing:
+     * - `error`: An error code indicating the result of the check.
+     * - `SyncError`: A detailed sync error code providing more context.
+     * - `SyncWarning`: A sync warning code returned by `FileSystemAccess::issyncsupported`.
+     *
+     * Possible error codes include:
+     * - `API_ENOENT`: Remote node does not exist.
+     * - `API_EARGS`: Invalid arguments, such as an invalid scan interval, mismatched drive paths or
+     *   given directory involved in other syncs.
+     * - `API_EEXIST`: If there is an active sync already initiated with the given node, containing
+     *   the node or the given node contains a another sync's root.
+     * - `API_EFAILED`: General failure due to account status or unsupported filesystem.
+     * - `API_EACCESS`: Local path is not a directory or cannot be accessed.
+     * - `API_ETEMPUNAVAIL`: Local path is temporarily unavailable.
+     * - `API_EINTERNAL`: Internal error requiring account reload or restart.
+     *
+     * @note
+     * - Symbolic links and mount points are considered during validation to prevent syncing
+     * unsupported paths.
+     */
+    SyncErrorInfo checkSyncConfig(const SyncConfig& syncConfig);
 
     /**
      * @brief add sync. Will fill syncError/syncWarning in the SyncConfig in case there are any.
@@ -1066,9 +1254,101 @@ public:
      */
     void importSyncConfigs(const char* configs, std::function<void(error)> completion);
 
-public:
+    /**
+     * @brief Changes the local/remote root of a sync to a different path/node
+     *
+     * @note This function only allows changing the local or the remote roots at once. To decide
+     * which one would be changes, one of newRemoteRootNodeHandle or newLocalRootPath must be
+     * UNDEF or nullptr respectively. Otherwise an API_EARGS will be returned
+     *
+     * @param backupId The backup id of the sync to be modified
+     * @param newRemoteRootNodeHandle The handle of the node that will be used for the new root on
+     * the cloud
+     * @param newLocalRootPath The path to the new root of the sync locally
+     * @param completion A completion function to be called once the logic is done, with the
+     * corresponding error.
+     */
+    void changeSyncRoot(const handle backupId,
+                        const handle newRemoteRootNodeHandle,
+                        const char* const newLocalRootPath,
+                        std::function<void(error, SyncError)>&& completion);
 
-#endif  // ENABLE_SYNC
+private:
+    static constexpr std::chrono::seconds TIMEOUT_TO_SET_SYNC_UPLOAD_THROTTLE_PARAMS_FROM_API{
+        86400};
+
+    std::chrono::steady_clock::time_point mSetSyncUploadThrottleParamsFromAPILastTime;
+
+    std::chrono::seconds timeSinceLastSetSyncUploadThrottleParamsFromAPI() const
+    {
+        return std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - mSetSyncUploadThrottleParamsFromAPILastTime);
+    }
+
+    void setSyncUploadThrottleParamsFromAPIAfterTimeout();
+
+    void handleSetThrottleResult(const CommandSetThrottlingParams::ResultVariant& result);
+
+public:
+    /**
+     * @brief Sets the upload throttling configurable values retrieved directly from API.
+     *
+     * @see Syncs::setThrottleUpdateRate()
+     * @see Syncs::setMaxUploadBeforeThrottle()
+     */
+    void setSyncUploadThrottleParamsFromAPI();
+
+    /**
+     * @brief Sets the upload throttling configurable value throttleUpdateRate.
+     *
+     * @see Syncs::setThrottleUpdateRate()
+     */
+    void setSyncUploadThrottleUpdateRate(std::chrono::seconds throttleUpdateRate,
+                                         std::function<void(const error)>&& completion);
+
+    /**
+     * @brief Sets the upload throttling configurable value maxUploadsBeforeThrottle.
+     *
+     * @see Syncs::setMaxUploadsBeforeThrottle()
+     */
+    void setSyncMaxUploadsBeforeThrottle(const unsigned maxUploadsBeforeThrottle,
+                                         std::function<void(const error)>&& completion);
+
+    /**
+     * @brief Retrieves the upload throttling configurable values.
+     */
+    void syncUploadThrottleValues(
+        std::function<void(const std::chrono::seconds /* updateRateInSeconds */,
+                           const unsigned /* maxUploadsBeforeThrottle */)>&& completion);
+
+    /**
+     * @brief Retrieves the lower and upper upload throttling configurable values.
+     */
+    void syncUploadThrottleValuesLimits(std::function<void(ThrottleValueLimits&&)>&& completion);
+
+    /**
+     * @brief Checks whether there are delayed uploads pending to be processed.
+     */
+    void checkSyncUploadsThrottled(std::function<void(const bool)>&& completion);
+
+    /**
+     * @brief Sets the IUploadThrottlingManager for Syncs.
+     *
+     * The Syncs object already constructs a IUploadThrottlingManager type object by default.
+     * However, this method allows to change the object if needed.
+     *
+     * @param uploadThrottlingManager The shared_ptr to the IUploadThrottlingManager type object.
+     * @param completion The completion function to be called after the operations
+     * finishes.
+     */
+    void setSyncUploadThrottlingManager(
+        std::shared_ptr<IUploadThrottlingManager> uploadThrottlingManager,
+        std::function<void(const error)>&& completion);
+
+public:
+#else
+    void setSyncUploadThrottleParamsFromAPI() {}
+#endif // ENABLE_SYNC
 
     /**
      * @brief creates a tlv with one record and returns it encrypted with master key
@@ -1109,13 +1389,10 @@ public:
     void sendchatstats(const char*, int port);
 
     // send chat logs with user's annonymous id
-    void sendchatlogs(const char*, mega::handle userid, mega::handle callid, int port);
+    void sendchatlogs(const char*, mega::handle forUserID, mega::handle callid, int port);
 
     // send a HTTP request
     void httprequest(const char*, int, bool = false, const char* = NULL, int = 1);
-
-    // maximum outbound throughput (per target server)
-    int putmbpscap;
 
     // User-Agent header for HTTP requests
     string useragent;
@@ -1127,7 +1404,8 @@ public:
     handle_vector purchase_basket;
 
     // enumerate Pro account purchase options
-    void purchase_enumeratequotaitems();
+    // Optional countryCode to set the desired currency
+    void purchase_enumeratequotaitems(const std::optional<std::string>& countryCode = std::nullopt);
 
     // clear shopping basket
     void purchase_begin();
@@ -1167,6 +1445,11 @@ public:
     // clean rubbish bin
     void cleanrubbishbin();
 
+    // process a received storage status value from API command and update the state if needed
+    // returns true if the storagestatus_t arg is expected (STORAGE_GREEN, STORAGE_ORANGE,
+    // STORAGE_RED), false otherwise.
+    bool processStorageStatusFromCmd(const storagestatus_t);
+
     // change the storage status
     bool setstoragestatus(storagestatus_t);
 
@@ -1200,10 +1483,10 @@ public:
     userpriv_vector * readuserpriv(JSON* j);
 
     // grant access to a chat peer to one specific node
-    void grantAccessInChat(handle chatid, handle h, const char *uid);
+    void grantAccessInChat(handle chatid, handle h, const char* peer);
 
     // revoke access to a chat peer to one specific node
-    void removeAccessInChat(handle chatid, handle h, const char *uid);
+    void removeAccessInChat(handle chatid, handle h, const char* peer);
 
     // update permissions of a peer in a chat
     void updateChatPermissions(handle chatid, handle uh, int priv);
@@ -1258,8 +1541,15 @@ public:
     void getmegaachievements(AchievementsDetails *details);
 
     // get welcome pdf
+    void importOrDelayWelcomePdf();
+    bool wasWelcomePdfImportDelayed();
+    void importWelcomePdfIfDelayed();
+    void setWelcomePdfNeedsDelayedImport(bool requestImport);
+
+private:
     void getwelcomepdf();
 
+public:
     // report an event to the API logger
     void reportevent(const char*, const char* = NULL);
     void reportevent(const char*, const char*, int tag);
@@ -1280,7 +1570,9 @@ public:
     std::shared_ptr<Node> getovnode(Node *parent, string *name);
 
     // Load from db node children at first level
-    sharedNode_list getChildren(const Node *parent, CancelToken cancelToken = CancelToken());
+    sharedNode_list getChildren(const Node* parent,
+                                CancelToken cancelToken = CancelToken(),
+                                bool includeVersions = false);
 
     // Get number of children from a node
     size_t getNumberOfChildren(NodeHandle parentHandle);
@@ -1307,6 +1599,23 @@ public:
     bool retryessl;
 
 private:
+    // The current request's status in millis.
+    //
+    // This member is maintained by procreqstat(...) whether request
+    // monitoring is enabled or not, the idea being that we want an
+    // application to be able to show a progress bar once any request
+    // starts, without any delay.
+    //
+    // When the SDK starts a request, it checks to see if this member is
+    // valid. If it is, it immediately notifies the application.
+    //
+    // If this member is not valid when a request is started, the SDK delays
+    // notifying the application until progress information is received.
+    std::optional<int> mRequestProgress;
+
+    // Tracks whether we've notified the application of request progress.
+    bool mRequestProgressNotified = false;
+
     // flag to start / stop the request status monitor
     bool mReqStatEnabled = false;
 public:
@@ -1484,9 +1793,6 @@ public:
     // next internal upload handle (call UploadHandle::next() to update value)
     UploadHandle mUploadHandle;
 
-    // just one notification after fetchnodes and catch-up actionpackets
-    bool notifyStorageChangeOnStateCurrent = false;
-
     // maximum number of concurrent transfers (uploads + downloads)
     static const unsigned MAXTOTALTRANSFERS;
 
@@ -1538,7 +1844,6 @@ public:
     std::shared_ptr<Node> sc_deltree();
     handle sc_newnodes(Node* priorActionpacketDeletedNode, bool& firstHandleMismatchedDelete);
     void sc_contacts();
-    void sc_keys();
     void sc_fileattr();
     void sc_userattr();
     bool sc_shares();
@@ -1578,9 +1883,6 @@ public:
     // add node to vector and return index
     unsigned addnode(sharedNode_vector* v, std::shared_ptr<Node> n) const;
 
-    // crypto request response
-    void cr_response(sharedNode_vector*, sharedNode_vector*, JSON*);
-
     // read node tree from JSON object
     void readtree(JSON*, Node* priorActionpacketDeletedNode, bool& firstHandleMatchedDelete);
 
@@ -1595,6 +1897,17 @@ public:
     bool isprivatehandle(handle*);
 
     // add direct read
+    void queueread(handle,
+                   bool,
+                   SymmCipher*,
+                   int64_t,
+                   m_off_t,
+                   m_off_t,
+                   DirectRead::Callback&& callback,
+                   const char* = NULL,
+                   const char* = NULL,
+                   const char* = NULL);
+
     void queueread(handle, bool, SymmCipher*, int64_t, m_off_t, m_off_t, void*, const char* = NULL, const char* = NULL, const char* = NULL);
 
     // execute pending direct reads
@@ -1610,8 +1923,10 @@ public:
 
     void dodiscarduser(User* u, bool discardnotified);
 
-    void enabletransferresumption(const char *loggedoutid = NULL);
-    void disabletransferresumption(const char *loggedoutid = NULL);
+    void enabletransferresumption();
+    void disabletransferresumption();
+
+    void resumeTransfersForNotLoggedInInstance();
 
     // application callbacks
     struct MegaApp* app;
@@ -1640,7 +1955,7 @@ public:
     // NodeManager instance to wrap all access to Node objects
     NodeManager mNodeManager;
 
-    mutex nodeTreeMutex;
+    recursive_mutex nodeTreeMutex;
 
     // there is data to commit to the database when possible
     bool pendingsccommit;
@@ -1698,6 +2013,11 @@ public:
     // reqs[r] is open for adding commands
     // reqs[r^1] is being processed on the API server
     HttpReq* pendingcs;
+
+    // When triggering an API Hashcash challenge, the HTTP response will contain
+    // X-Hashcash header, with relevant data to be saved and used for the next retry.
+    string mReqHashcashToken;
+    uint8_t mReqHashcashEasiness{};
 
     // Only queue the "Server busy" event once, until the current cs completes, otherwise we may DDOS
     // ourselves in cases where many clients get 500s for a while and then recover at the same time
@@ -1805,6 +2125,32 @@ public:
     // return the list of incoming shared folder (only top level, nested inshares are skipped)
     sharedNode_vector getInShares();
 
+    template<typename Function>
+    using IsIncomingShareIterator =
+        std::conjunction<std::is_invocable<Function, std::shared_ptr<Node>>,
+                         std::is_same<std::invoke_result_t<Function, std::shared_ptr<Node>>, void>>;
+
+    // Call function on each incoming share.
+    template<typename Function>
+    auto forEachIncomingShare(Function&& function)
+        -> std::enable_if_t<IsIncomingShareIterator<Function>::value, void>
+    {
+        // Iterate over each user.
+        for (const auto& user: users)
+        {
+            // And each node handle shared by that user.
+            for (const auto& handle: user.second.sharing)
+            {
+                // Get our hands on the incoming shared node.
+                if (auto node = nodebyhandle(handle); node && node->parent == nullptr)
+                {
+                    // Pass the node to our iterator function.
+                    std::invoke(function, std::move(node));
+                }
+            }
+        }
+    }
+
     // return the list of verified incoming shared folders (only top level, nested inshares are skipped)
     sharedNode_vector getVerifiedInShares();
 
@@ -1849,6 +2195,9 @@ public:
 
     // next TransferSlot to doio() on
     transferslot_list::iterator slotit;
+
+    // transfer statistics manager
+    stats::TransferStatsManager mTransferStatsManager;
 
     // send updates to app when the storage size changes
     int64_t mNotifiedSumSize = 0;
@@ -1923,6 +2272,9 @@ public:
 
     shared_ptr<Node> nodeByPath(const char* path, std::shared_ptr<Node> node = nullptr, nodetype_t type = TYPE_UNKNOWN);
 
+    using TotpTokenResult = std::pair<int, std::pair<std::string, unsigned>>;
+    TotpTokenResult generateTotpTokenFromNode(const handle h);
+
 #if ENABLE_SYNC
     std::shared_ptr<Node> nodebyfingerprint(LocalNode*);
 #endif /* ENABLE_SYNC */
@@ -1930,6 +2282,9 @@ public:
 private:
     // Private helper method for getRecentActions
     recentactions_vector getRecentActionsFromSharedNodeVector(sharedNode_vector&& v);
+
+    std::string getTransferDBName();
+
 public:
     // get a vector of recent actions in the account
     recentactions_vector getRecentActions(unsigned maxcount,
@@ -1974,9 +2329,13 @@ public:
 
     // functions for determining whether we can clone a node instead of upload
     // or whether two files are the same so we can just upload/download the data once
-    bool treatAsIfFileDataEqual(const FileFingerprint& nodeFingerprint, const LocalPath& file2, const string& filenameExtensionLowercaseNoDot);
-    bool treatAsIfFileDataEqual(const FileFingerprint& fp1, const string& filenameExtensionLowercaseNoDot1,
-                                const FileFingerprint& fp2, const string& filenameExtensionLowercaseNoDot2);
+    bool treatAsIfFileDataEqual(const FileFingerprint& nodeFingerprint,
+                                const LocalPath& file2,
+                                const std::string& filenameExtensionLowercaseNoDot) const;
+    bool treatAsIfFileDataEqual(const FileFingerprint& fp1,
+                                const std::string& filenameExtensionLowercaseNoDot1,
+                                const FileFingerprint& fp2,
+                                const std::string& filenameExtensionLowercaseNoDot2) const;
 
 #ifdef ENABLE_SYNC
 
@@ -2071,9 +2430,6 @@ public:
     // any other number -> parsing error
     int procphelement(JSON*);
 
-    void procsnk(JSON*);
-    void procsuk(JSON*);
-
     void procmcf(JSON*);
     void procmcna(JSON*);
 
@@ -2119,9 +2475,6 @@ public:
 
     // session ID length (binary)
     static const unsigned SIDLEN = 2 * SymmCipher::KEYLENGTH + USERHANDLE * 4 / 3 + 1;
-
-    void proccr(JSON*);
-    void procsr(JSON*);
 
     KeyManager mKeyManager;
 
@@ -2186,9 +2539,10 @@ public:
     bool discardnotifieduser(User *);
 
     PendingContactRequest* findpcr(handle);
+    std::optional<PendingContactRequest*> findpcr(const string&);
 
     // queue public key request for user
-    User *getUserForSharing(const char *uid);
+    User* getUserForSharing(const char* userID);
     void queuepubkeyreq(User*, std::unique_ptr<PubKeyAction>);
     void queuepubkeyreq(const char*, std::unique_ptr<PubKeyAction>);
 
@@ -2243,14 +2597,16 @@ public:
     // hash password
     error pw_key(const char*, byte*) const;
 
-    // returns a pointer to tmptransfercipher setting its key to the one provided
-    // tmptransfercipher key will change: to be used right away: this is not a dedicated SymmCipher for the transfer!
-    SymmCipher *getRecycledTemporaryTransferCipher(const byte *key, int type = 1);
+    // returns a pointer to tmptransfercipher, setting its key to the one provided;
+    // tmptransfercipher key will change to be used right away; this is not a dedicated SymmCipher
+    // for the transfer!
+    SymmCipher* getRecycledTemporaryTransferCipher(const byte* newKey, int type = 1);
 
-    // returns a pointer to tmpnodecipher setting its key to the one provided
-    // tmpnodecipher key will change: to be used right away: this is not a dedicated SymmCipher for the node!
-    SymmCipher *getRecycledTemporaryNodeCipher(const string *key);
-    SymmCipher *getRecycledTemporaryNodeCipher(const byte *key);
+    // returns a pointer to tmpnodecipher, setting its key to the one provided;
+    // tmpnodecipher key will change to be used right away; this is not a dedicated SymmCipher for
+    // the node!
+    SymmCipher* getRecycledTemporaryNodeCipher(const string* newKey);
+    SymmCipher* getRecycledTemporaryNodeCipher(const byte* newKey);
 
     // request a link to recover account
     void getrecoverylink(const char *email, bool hasMasterkey);
@@ -2262,7 +2618,11 @@ public:
     void getprivatekey(const char *code);
 
     // confirm a recovery link to restore the account
-    void confirmrecoverylink(const char *code, const char *email, const char *password, const byte *masterkey = NULL, int accountversion = 1);
+    void confirmrecoverylink(const char* code,
+                             const char* email,
+                             const char* password,
+                             const byte* masterkey = NULL,
+                             int ownAccountVersion = 1);
 
     // request a link to cancel the account
     void getcancellink(const char *email, const char* = NULL);
@@ -2486,7 +2846,7 @@ private:
 // JourneyID and ViewID
 //
     // JourneyID for cs API requests and log events
-    JourneyID mJourneyId;
+    std::unique_ptr<JourneyID> mJourneyId;
 
 public:
 
@@ -2516,7 +2876,7 @@ public:
     void putSet(Set&& s, std::function<void(Error, const Set*)> completion);
 
     // generate "asr" command
-    void removeSet(handle sid, std::function<void(Error)> completion);
+    void removeSet(handle setID, std::function<void(Error)> completion);
 
     // generate "aft" command
     void fetchSetInPreviewMode(std::function<void(Error, Set*, elementsmap_t*)> completion);
@@ -2528,10 +2888,12 @@ public:
     void putSetElement(SetElement&& el, std::function<void(Error, const SetElement*)> completion);
 
     // generate "aerb" command
-    void removeSetElements(handle sid, vector<handle>&& eids, std::function<void(Error, const vector<int64_t>*)> completion);
+    void removeSetElements(handle setID,
+                           vector<handle>&& eids,
+                           std::function<void(Error, const vector<int64_t>*)> completion);
 
     // generate "aer" command
-    void removeSetElement(handle sid, handle eid, std::function<void(Error)> completion);
+    void removeSetElement(handle setID, handle eid, std::function<void(Error)> completion);
 
     // handle "aesp" parameter, part of 'f'/ "fetch nodes" response
     bool procaesp(JSON& j);
@@ -2539,8 +2901,8 @@ public:
     // load Sets and Elements from json
     error readSetsAndElements(JSON& j, map<handle, Set>& newSets, map<handle, elementsmap_t>& newElements);
 
-    // return Set with given sid or nullptr if it was not found
-    const Set* getSet(handle sid) const;
+    // return Set with given setID or nullptr if it was not found
+    const Set* getSet(handle setID) const;
 
     // return all available Sets, indexed by id
     const map<handle, Set>& getSets() const { return mSets; }
@@ -2551,31 +2913,31 @@ public:
     // search for Set with the same id, and update its members
     bool updateSet(Set&& s);
 
-    // delete Set with elemId from local memory; return true if found and deleted
-    bool deleteSet(handle sid);
+    // delete Set with setID from local memory; return true if found and deleted
+    bool deleteSet(handle setID);
 
-    // return Element count for Set sid, or 0 if not found
-    unsigned getSetElementCount(handle sid) const;
+    // return Element count for Set with setID, or 0 if not found
+    unsigned getSetElementCount(handle setID) const;
 
-    // return Element with given eid from Set sid, or nullptr if not found
-    const SetElement* getSetElement(handle sid, handle eid) const;
+    // return Element with given eid from Set with setID, or nullptr if not found
+    const SetElement* getSetElement(handle setID, handle eid) const;
 
     // return all available Elements in a Set, indexed by eid
-    const elementsmap_t* getSetElements(handle sid) const;
+    const elementsmap_t* getSetElements(handle setID) const;
 
     // add new SetElement or replace exisiting one
     const SetElement* addOrUpdateSetElement(SetElement&& el);
 
-    // delete Element with eid from Set with sid in local memory; return true if found and deleted
-    bool deleteSetElement(handle sid, handle eid);
+    // delete Element with eid from Set with setID in local memory; return true if found and deleted
+    bool deleteSetElement(handle setID, handle eid);
 
-    // return true if Set with given sid is exported (has a public link)
-    bool isExportedSet(handle sid) const;
+    // return true if Set with given setID was exported (has a public link)
+    bool isExportedSet(handle setID) const;
 
-    void exportSet(handle sid, bool makePublic, std::function<void(Error)> completion);
+    void exportSet(handle setID, bool makePublic, std::function<void(Error)> completion);
 
     // returns result of the operation and the link created
-    pair<error, string> getPublicSetLink(handle sid) const;
+    pair<error, string> getPublicSetLink(handle setID) const;
 
     // returns error code and public handle for the link provided as a param
     error fetchPublicSet(const char* publicSetLink, std::function<void(Error, Set*, elementsmap_t*)>);
@@ -2598,15 +2960,15 @@ private:
     error readElement(JSON& j, SetElement& el);
     error readAllNodeMetadata(JSON& j, map<handle, SetElement::NodeMetadata>& nodes);
     error readSingleNodeMetadata(JSON& j, SetElement::NodeMetadata& node);
-    bool decryptNodeMetadata(SetElement::NodeMetadata& nodeMeta, const string& key);
-    error readExportedSet(JSON& j, Set& s, pair<bool, m_off_t>& exportRemoved);
+    bool decryptNodeMetadata(SetElement::NodeMetadata& nodeMeta, const string& encryptionKey);
+    error readExportedSet(JSON& j, Set& s);
     error readSetsPublicHandles(JSON& j, map<handle, Set>& sets);
     error readSetPublicHandle(JSON& j, map<handle, Set>& sets);
     void fixSetElementWithWrongKey(const Set& set);
     size_t decryptAllSets(map<handle, Set>& newSets, map<handle, elementsmap_t>& newElements, map<handle, SetElement::NodeMetadata>* nodeData);
     error decryptSetData(Set& s);
     error decryptElementData(SetElement& el, const string& setKey);
-    string decryptKey(const string& k, SymmCipher& cipher) const;
+    string decryptKey(const string& encryptedKey, SymmCipher& cipher) const;
     bool decryptAttrs(const string& attrs, const string& decrKey, string_map& output);
     string encryptAttrs(const string_map& attrs, const string& encryptionKey);
 
@@ -2629,7 +2991,7 @@ private:
     bool updatescsetelements();
     void notifypurgesetelements();
     void notifysetelement(SetElement*);
-    void clearsetelementnotify(handle sid);
+    void clearsetelementnotify(handle setID);
     vector<SetElement*> setelementnotify;
     map<handle, elementsmap_t> mSetElements; // indexed by Set id, then Element id
 
@@ -2650,18 +3012,31 @@ private:
     // Generates a key pair (x25519 (Cu) key pair) to use for Vpn Credentials (MegaClient::putVpnCredential)
     StringKeyPair generateVpnKeyPair();
 
-    std::pair<bool, error> checkRenameNodePrecons(std::shared_ptr<Node> n);
+    /**
+     * @brief Stores json serialized `data` into the  `attrs` `NODE_ATTR_PASSWORD_MANAGER` field
+     *
+     * @param attrs The node attribute map to write the serialized password data
+     * @param data The attribute map containing password-related information.
+     */
+    void preparePasswordManagerNodeData(attr_map& attrs, const AttrMap& data) const;
 
-    // Password Manager - private
-    void preparePasswordNodeData(attr_map& attrs, const AttrMap& data) const;
+    /**
+     * @brief Checks preconditions for node rename operations on the given node.
+     *
+     * @return  Possible returned error codes:
+     * - API_EPAYWALL: If over disk quota paywall
+     * - API_EARGS: If the given node is nullptr
+     * - API_EACCESS: If the node is not full accessible
+     * - API_OK: No problems to rename the node
+     */
+    error checkRenameNodePrecons(std::shared_ptr<Node> n);
 
     // Get a string to complete sc/wsc url and receive partial action packages
     // It's used from clients of type PWD and VPN
     std::string getPartialAPs();
 
 public:
-
-/* Mega VPN methods */
+    /* Mega VPN methods */
 
     // Call "vpnr" command.
     void getVpnRegions(CommandGetVpnRegions::Cb&& = nullptr /* Completion */);
@@ -2679,46 +3054,120 @@ public:
     void checkVpnCredential(std::string&& /* User Public Key */, CommandCheckVpnCredential::Cb&& = nullptr /* Completion */);
 
     /**
-     * @brief Generates a VPN credential string equivalent to the .conf file generated by the webclient.
-     * This method is meant to be called with the credential details obtained from CommandPutVpnCredential.
+     * @brief Generates a VPN credential string equivalent to the .conf file generated by the
+     * webclient. This method is meant to be called with the credential details obtained from
+     * CommandPutVpnCredential.
      *
      * Content:
      *    [Interface]
      *    PrivateKey = User Private Key
-     *    Address = IPv4, IPv6
-     *    DNS = IPv4, IPv6
+     *    Address = IPv4, IPv6 of the Region
+     *    DNS = DNS of the Cluster
      *
      *    [Peer]
      *    PublicKey = Cluster Public Key
      *    AllowedIPs = 0.0.0.0/0, ::/0
-     *    Endpoint = host:port
+     *    Endpoint = host of the Cluster
      *
-     * @note These VPN credential details are not the same than the data obtained from MegaClient::getVpnCredentials()
+     * @note These VPN credential details are not the same than the data obtained from
+     * MegaClient::getVpnCredentials()
      * @see MegaClient::putVpnCredential()
      * @return The string with the VPN credentials specified above.
-    */
-    string generateVpnCredentialString(int /* ClusterID */,
-                                       std::string&& /* VPN Region */,
-                                       std::string&& /* IPv4 */,
-                                       std::string&& /* IPv6 */,
-                                       StringKeyPair&& /* Peer Key Pair <User Private, Cluster Public> */);
+     */
+    string generateVpnCredentialString(
+        const std::string& /* host */,
+        const std::vector<std::string>& /* DNS */,
+        std::string&& /* IPv4 */,
+        std::string&& /* IPv6 */,
+        StringKeyPair&& /* Peer Key Pair <User Private, Cluster Public> */);
 
-/* Mega VPN methods END */
+    void getNetworkConnectivityTestServerInfo(
+        CommandGetNetworkConnectivityTestServerInfo::Completion&& completion);
+
+    void runNetworkConnectivityTest(
+        std::function<void(const Error&, NetworkConnectivityTestResults&&)>&& completion);
+    void sendNetworkConnectivityTestEvent(const NetworkConnectivityTestResults& results);
+    /* Mega VPN methods END */
 
     void fetchCreditCardInfo(CommandFetchCreditCardCompletion completion);
     void setProFlexi(bool newProFlexi);
 
     // Password Manager
     static const char* const NODE_ATTR_PASSWORD_MANAGER;
-    static const char* const PWM_ATTR_PASSWORD_NOTES;
-    static const char* const PWM_ATTR_PASSWORD_URL;
-    static const char* const PWM_ATTR_PASSWORD_USERNAME;
-    static const char* const PWM_ATTR_PASSWORD_PWD;
+    static constexpr std::string_view PWM_ATTR_NODE_TYPE{"t"};
+    static constexpr std::string_view PWM_ATTR_NODE_TYPE_CREDIT_CARD{"c"};
+    static constexpr std::string_view PWM_ATTR_CREDIT_CARD_NUMBER{"nu"};
+    static constexpr std::string_view PWM_ATTR_CREDIT_NOTES{"n"};
+    static constexpr std::string_view PWM_ATTR_CREDIT_CARD_HOLDER{"u"};
+    static constexpr std::string_view PWM_ATTR_CREDIT_CVV{"cvv"};
+    static constexpr std::string_view PWM_ATTR_CREDIT_EXP_DATE{"exp"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_NOTES{"n"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_URL{"url"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_USERNAME{"u"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_PWD{"pwd"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_TOTP{"totp"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_TOTP_SHSE{"shse"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_TOTP_EXPT{"t"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_TOTP_HASH_ALG{"alg"};
+    static constexpr std::string_view PWM_ATTR_PASSWORD_TOTP_NDIGITS{"nd"};
+
+    enum class PwmEntryType
+    {
+        PASSWORD,
+        CREDIT_CARD,
+    };
+
+    /**
+     * @brief This method converts the value in the field PWM_ATTR_NODE_TYPE into a PwmEntryType. If
+     * the value is not expected this method returns nullopt
+     */
+    static std::optional<PwmEntryType> toPwmEntryType(const std::optional<std::string_view>& t)
+    {
+        if (!t) // Password entries have no PWM_ATTR_NODE_TYPE field
+            return PwmEntryType::PASSWORD;
+
+        if (*t == PWM_ATTR_NODE_TYPE_CREDIT_CARD)
+            return PwmEntryType::CREDIT_CARD;
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Checks if the given `data` stores the provided `type` of PWM node
+     * @note `data` must be an AttrMap obtained from reading the NODE_ATTR_PASSWORD_MANAGER node
+     * attribute.
+     */
+    static bool isPwmDataOfType(const AttrMap& data, const PwmEntryType type)
+    {
+        return toPwmEntryType(data.getStringView(MegaClient::PWM_ATTR_NODE_TYPE)) == type;
+    }
+
     NodeHandle getPasswordManagerBase();
-    void createPasswordManagerBase(int rtag, CommandCreatePasswordManagerBase::Completion cbRequest);
-    error createPasswordNode(const char* name, std::unique_ptr<AttrMap> data,
-                             std::shared_ptr<Node> nParent, int rtag);
-    error updatePasswordNode(NodeHandle nh, std::unique_ptr<AttrMap> newData,
+    void createPasswordManagerBase(int rtag,
+                                   CommandCreatePasswordManagerBase::Completion cbRequest);
+
+    /** @brief The same as updatePasswordNode but for updating a Credit Card Node */
+    error updateCreditCardNode(const NodeHandle nh,
+                               std::unique_ptr<AttrMap> newData,
+                               CommandSetAttr::Completion&& cb);
+
+    /**
+     * @brief Updates the password node data stored in the node with the given `nh` with the
+     * provided `newData`
+     *
+     * @param nh Handle of the node to update
+     * @param newData Map with the new data. Notice that fields set to empty strings will cause the
+     * data of that field to be removed.
+     * @param cb The callback to forward to the `setattr` call.
+     * @return An error code that can be:
+     * - API_EARGS, if:
+     *   + newData is empty or nullptr
+     *   + The node to update is not a password node
+     *   + The updates leave the node in an invalid state
+     * - All the possible codes returned by MegaClient::checkRenameNodePrecons
+     * - All the possible codes returned by MegaClient::setattr
+     */
+    error updatePasswordNode(const NodeHandle nh,
+                             std::unique_ptr<AttrMap> newData,
                              CommandSetAttr::Completion&& cb);
 
     // Data type to call putnodes and create password nodes
@@ -2726,22 +3175,106 @@ public:
     // Data type to handle wrongly formatted password info. Key: info, val: ErrCode
     using BadPasswordData = std::map<std::string, PasswordEntryError>;
 
+    // Validator for data of a new PasswordManagerNode
+    using PasswordDataValidator = std::function<PasswordEntryError(const AttrMap&)>;
+
+    // Check createPasswordEntries
+    error createPasswordEntry(const char* name,
+                              std::unique_ptr<AttrMap> data,
+                              MegaClient::PasswordDataValidator dataValidator,
+                              std::shared_ptr<Node> nParent,
+                              int rtag);
+
     /**
-     * @brief Creates multiple password nodes with a single putnodes call
+     * @brief Creates multiple PasswordManagerNode instances with a single putnodes call
      *
      * @note API_EARGS will be returned if:
-     *     - nParent is not a password node folder
+     *     - nParent is not a PasswordManagerNode folder
      *     - If any of the given values in data is invalid, e.g., the password field is missing
      *
      * @param data A map with the name of the password entry to create as key and the information of
      * the password (AttrMap) as values.
+     * @param dataValidator a std::function to validate the given data before creating a new
+     * PasswordManagerNode. Note: The same validator will apply to all the entries in the data
+     * parameter.
      * @param nParent The parent node that will contain the nodes to be created
      * @param rTag tag parameter for putnodes call
      * @return error code (API_OK if succeeded)
      */
-    error createPasswordNodes(const ValidPasswordData& data,
-                              std::shared_ptr<Node> nParent,
-                              int rTag);
+    error createPasswordEntries(ValidPasswordData&& data,
+                                PasswordDataValidator dataValidator,
+                                std::shared_ptr<Node> nParent,
+                                int rTag);
+
+    using ImportPaswordResult = std::tuple<error, MegaClient::BadPasswordData, std::size_t>;
+
+    /**
+     * @brief Import password nodes from a file
+     *
+     * @param filePath Path to the file with the entries to import
+     * @param source Specifies the source of the input file (e.g. `FileSource::GOOGLE_PASSWORD`)
+     * @param parentHandle The handle of the parent node that will contain the imported entries
+     * @param rTag tag parameter for putnodes call
+     * @return std::tuple with
+     * - error: An error code indicating that the whole import operation failed.
+     *   + API_EARGS:
+     *      * The given parent handle doesn't map to a node
+     *      * Invalid file format for the given source
+     *      * No valid entries in the file
+     *   + API_EREAD:
+     *      * The input file cannot be opened
+     *   + API_EACCESS:
+     *      * Problem loading the file once opened, e.g. invalid header
+     *   + Errors returned by `MegaClient::createPasswordNodes`
+     * - BadPasswordData: A vector of pairs<string, PasswordEntryError> with the lines that were not
+     *   successfully parsed (first) and an error code (second) to specify the reason.
+     * - size_t: The number of successfully parsed entries that were sent to putnodes
+     *   @note This number can be 0, in that case, no call to putnodes will be done.
+     */
+    ImportPaswordResult importPasswordsFromFile(const std::string& filePath,
+                                                const pwm::import::FileSource source,
+                                                const NodeHandle parentHandle,
+                                                const int rTag);
+
+    /**
+     * @brief Validates the format of TOTP data stored in the given attribute map.
+     *
+     * This function checks the validity of essential TOTP fields:
+     * - Shared secret (`PWM_ATTR_PASSWORD_TOTP_SHSE`)
+     * - Number of digits (`PWM_ATTR_PASSWORD_TOTP_NDIGITS`)
+     * - Expiry time (`PWM_ATTR_PASSWORD_TOTP_EXPT`)
+     * - Hash algorithm (`PWM_ATTR_PASSWORD_TOTP_HASH`)
+     *
+     * If any field is ill-formed, an appropriate error code is returned.
+     *
+     * @param data The attribute map containing TOTP-related information.
+     * @return PasswordEntryError An error code indicating validation status:
+     * - `OK` if all fields are correctly formed.
+     * - `INVALID_TOTP_SHARED_SECRET` if the shared secret is invalid.
+     * - `INVALID_TOTP_NDIGITS` if the number of digits is invalid.
+     * - `INVALID_TOTP_EXPT` if the expiration time is invalid.
+     * - `INVALID_TOTP_ALG` if the hash algorithm is invalid.
+     *
+     * @note Uses `totp::validateFields` to check field validity.
+     */
+    static PasswordEntryError validateTotpDataFormat(const AttrMap& data);
+
+    /**
+     * @brief Validates the TOTP data for a new node.
+     *
+     * This function checks if the TOTP shared secret (`PWM_ATTR_PASSWORD_TOTP_SHSE`)
+     * is present in the provided attribute map. If it is missing, an error is returned.
+     * Otherwise, it validates the rest of the fields by calling `validateTotpDataFormat`.
+     *
+     * @param data The attribute map containing TOTP data attr map.
+     * @return PasswordEntryError An error code indicating validation status:
+     * - `MISSING_TOTP_SHARED_SECRET` if the shared secret is missing.
+     * - `MISSING_TOTP_NDIGITS` if the number of digits is missing.
+     * - `MISSING_TOTP_EXPT` if the expiration time is missing.
+     * - `MISSING_TOTP_HASH_ALG` if the hashing algorithm is missing.
+     * - The result of `validateTotpDataFormat(data)`, which checks other fields.
+     */
+    static PasswordEntryError validateNewNodeTotpData(const AttrMap& data);
 
     /**
      * @brief Ensures the given data can be used to create a new password node.
@@ -2751,7 +3284,14 @@ public:
      * @param data The map with the password data
      * @return The error code for the validation
      */
-    static PasswordEntryError validatePasswordData(const AttrMap& data);
+    static PasswordEntryError validateNewPasswordNodeData(const AttrMap& data);
+
+    /**
+     * @brief validateNewCreditCardNodeData
+     * @param data
+     * @return
+     */
+    static PasswordEntryError validateNewCreditCardNodeData(const AttrMap& data);
 
     /**
      * @brief Processes the input password entries and splits them into two containers (bad, good).
@@ -2811,8 +3351,15 @@ public:
      */
     void getJSCData(GetJSCDataCallback callback);
 
+    void getMyIp(CommandGetMyIP::Cb&& completion);
+
+    void getSubscriptionCancellationDetails(
+        const char* originalTransactionId,
+        unsigned int gatewayId,
+        CommandGetSubscriptionCancellationDetails::CompletionCallback&& completion);
+
     // FUSE client adapter.
-    fuse::ClientAdapter mFuseClientAdapter;
+    common::ClientAdapter mFuseClientAdapter;
 
     // FUSE service.
     fuse::Service mFuseService;
@@ -2890,7 +3437,7 @@ private:
      */
     void JSCDataRetrieved(GetJSCDataCallback& callback,
                           Error result,
-                          TLVstore* store);
+                          std::unique_ptr<string_map> store);
 
     // Last known capacity retrieved from the cloud.
     m_off_t mLastKnownCapacity = -1;

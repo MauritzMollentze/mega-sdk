@@ -22,17 +22,17 @@ public:
     MountResult add(const MountInfo& info) override;
 
     // Check if a file exists in the cache.
-    bool cached(NormalizedPath path) const override;
+    bool cached(common::NormalizedPath path) const override;
 
     // Called by the client when its view of the cloud is current.
     void current() override;
 
     // Describe the inode representing the file at the specified path.
-    ErrorOr<InodeInfo> describe(const NormalizedPath& path) const override;
+    common::ErrorOr<InodeInfo> describe(const common::NormalizedPath& path) const override;
 
     // Disable an enabled mount.
     void disable(MountDisabledCallback callback,
-                 const LocalPath& path,
+                 const std::string& name,
                  bool remember) override;
 
     // Discard node events.
@@ -43,39 +43,39 @@ public:
                           std::size_t target) override;
 
     // Enable a disabled mount.
-    MountResult enable(const LocalPath& path,
+    MountResult enable(const std::string& name,
                        bool remember) override;
 
     // Query whether a specified mount is enabled.
-    bool enabled(const LocalPath& path) const override;
+    bool enabled(const std::string& name) const override;
 
     // Execute a function on some task.
-    Task execute(std::function<void(const Task&)> function) override;
+    common::Task execute(std::function<void(const common::Task&)> function) override;
 
     // Update a mount's flags.
-    MountResult flags(const LocalPath& path,
+    MountResult flags(const std::string& name,
                       const MountFlags& flags) override;
 
     // Query a mount's flags.
-    MountFlagsPtr flags(const LocalPath& path) const override;
+    MountFlagsPtr flags(const std::string& name) const override;
 
-    // Describe the mount associated with path.
-    MountInfoPtr get(const LocalPath& path) const override;
+    // Describe the mount associated with name.
+    MountInfoPtr get(const std::string& name) const override;
 
     // Describe all (enabled) mounts.
-    MountInfoVector get(bool enabled) const override;
+    MountInfoVector get(bool onlyEnabled) const override;
 
-    // Retrieve the path of all mounts associated with this name.
-    NormalizedPathVector paths(const std::string& name) const override;
+    // Retrieve the path of the mount associated with name.
+    common::NormalizedPath path(const std::string& name) const override;
 
     // Remove a disabled mount from the database.
-    MountResult remove(const LocalPath& path) override;
+    MountResult remove(const std::string& path) override;
 
     // Check whether the specified path is "syncable."
-    bool syncable(const NormalizedPath& path) const override;
+    bool syncable(const common::NormalizedPath& path) const override;
 
     // Called by the client when nodes have been changed in the cloud.
-    void updated(NodeEventQueue& events) override;
+    void updated(common::NodeEventQueue& events) override;
 
     // Update the FUSE database to the specified version.
     MountResult upgrade(const LocalPath& path,

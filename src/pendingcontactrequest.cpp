@@ -45,7 +45,12 @@ PendingContactRequest::PendingContactRequest(const handle id,const char *oemail,
     memset(&changed, 0, sizeof changed);
 }
 
-void PendingContactRequest::update(const char *oemail, const char *temail, const m_time_t ts, const m_time_t uts, const char *msg, bool outgoing)
+void PendingContactRequest::update(const char* oemail,
+                                   const char* temail,
+                                   const m_time_t newTs,
+                                   const m_time_t newUts,
+                                   const char* newMessage,
+                                   bool outgoing)
 {
     if (oemail)
     {
@@ -55,11 +60,11 @@ void PendingContactRequest::update(const char *oemail, const char *temail, const
     {
         JSON::copystring(&(this->targetemail), temail);
     }
-    this->ts = ts;
-    this->uts = uts;
-    if (msg)
+    ts = newTs;
+    uts = newUts;
+    if (newMessage)
     {
-        JSON::copystring(&(this->msg), msg);
+        JSON::copystring(&(msg), newMessage);
     }
 
     this->isoutgoing = outgoing;
@@ -118,7 +123,7 @@ PendingContactRequest* PendingContactRequest::unserialize(string *d)
     id = MemAccess::get<handle>(ptr);
     ptr += sizeof id;
 
-    l = *ptr++;
+    l = static_cast<unsigned char>(*ptr++);
     if (ptr + l + sizeof l > end)
     {
         return NULL;
@@ -127,7 +132,7 @@ PendingContactRequest* PendingContactRequest::unserialize(string *d)
     oemail.assign(ptr, l);
     ptr += l;
 
-    l = *ptr++;
+    l = static_cast<unsigned char>(*ptr++);
     if (ptr + l + sizeof ts + sizeof uts + sizeof l > end)
     {
         return NULL;
@@ -142,7 +147,7 @@ PendingContactRequest* PendingContactRequest::unserialize(string *d)
     uts = MemAccess::get<m_time_t>(ptr);
     ptr += sizeof uts;
 
-    l = *ptr++;
+    l = static_cast<unsigned char>(*ptr++);
     if (ptr + l > end)
     // should be ptr+l+sizeof(isoutgoing), but legacy code writes 0 bytes when false
     {

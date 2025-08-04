@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include <mega/common/normalized_path.h>
 #include <mega/fuse/platform/dispatcher_forward.h>
 #include <mega/fuse/platform/library.h>
 #include <mega/fuse/platform/mount_forward.h>
@@ -139,20 +140,26 @@ class Dispatcher
     // What mount are dispatching requests to?
     Mount& mMount;
 
+    // Where is this mount, mounted?
+    common::NormalizedPath mPath;
+
     // Who should be called for what requests?
     static const FSP_FILE_SYSTEM_INTERFACE mOperations;
 
 public:
-    explicit Dispatcher(Mount& mount);
+    explicit Dispatcher(Mount& mount,
+                        const common::NormalizedPath& path);
 
     ~Dispatcher();
+
+    const common::NormalizedPath& path() const;
 
     void reply(FSP_FSCTL_TRANSACT_RSP& response, Error result);
     void reply(FSP_FSCTL_TRANSACT_RSP& response, NTSTATUS result);
 
     FSP_FSCTL_TRANSACT_REQ& request() const;
 
-    void start();
+    void start(const common::NormalizedPath& path);
 
     void stop();
 }; // Dispatcher

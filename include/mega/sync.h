@@ -22,14 +22,18 @@
 #ifndef MEGA_SYNC_H
 #define MEGA_SYNC_H 1
 
-#include <future>
-#include <unordered_set>
-
 #include "db.h"
 #include "waiter.h"
 
+#include <filesystem>
+#include <future>
+#include <optional>
+#include <unordered_set>
+
 #ifdef ENABLE_SYNC
 #include "node.h"
+#include "syncinternals/syncinternals.h"
+#include "syncinternals/synciuploadthrottlingmanager.h"
 
 namespace mega {
 
@@ -40,6 +44,7 @@ class BackupMonitor;
 class MegaClient;
 struct JSON;
 class JSONWriter;
+using SyncIDtoConflictInfoMap = std::map<handle, list<NameConflict>>;
 
 // How should the sync engine detect filesystem changes?
 enum ChangeDetectionMethod
@@ -111,6 +116,15 @@ public:
     // check if we need to notify the App about error/enable flag changes
     bool stateFieldsChanged();
 
+    /**
+     * @brief In case this is an external backup, returns true if this is a backup sync and the
+     * given path belongs to the external drive. Always true for non-external backups.
+     */
+    bool isGoodPathForExternalBackup(const LocalPath& path) const
+    {
+        return !isExternal() || (isBackup() && mExternalDrivePath.isContainingPathOf(path));
+    }
+
     string syncErrorToStr();
     static string syncErrorToStr(SyncError errorCode);
 
@@ -181,6 +195,34 @@ public:
     // Name of this sync's state cache.
     string getSyncDbStateCacheName(handle fsid, NodeHandle nh, handle userId) const;
 
+    /**
+     * @brief Checks if there is a file in the system with the database with local nodes
+     * information and returns it if found.
+     *
+     * @param fsAccess The file system access needed to invoke the client's database
+     * getExistingDbPath method
+     * @param client The instance of MegaClient that has the information about the database
+     * location.
+     * @return std::nullopt if there is no database file, the path to the file otherwise.
+     */
+    std::optional<std::filesystem::path> getSyncDbPath(const FileSystemAccess& fsAccess,
+                                                       const MegaClient& client) const;
+
+    /**
+     * @brief If the current config has a database file, this method renames it so it matches
+     * what the target config expects.
+     *
+     * @param targetConfig The configuration that wants to take ownership of the local nodes
+     * database
+     * @param fsAccess The file system access needed to invoke the client's database
+     * getExistingDbPath method
+     * @param client The instance of MegaClient that has the information about the database
+     * location.
+     */
+    void renameDBToMatchTarget(const SyncConfig& targetConfig,
+                               FileSystemAccess& fsAccess,
+                               const MegaClient& client) const;
+
     // How should the engine detect filesystem changes?
     ChangeDetectionMethod mChangeDetectionMethod = CDM_NOTIFICATIONS;
 
@@ -202,6 +244,13 @@ private:
     bool mKnownEnabled = false;
     SyncRunState mKnownRunState = SyncRunState::Pending;
 };
+
+std::pair<error, SyncConfig> buildSyncConfig(const SyncConfig::Type syncType,
+                                             const std::string& localPath,
+                                             const std::string& name,
+                                             const std::string& drivePath,
+                                             const handle nodeHandle,
+                                             MegaClient& client);
 
 // Convenience.
 using SyncConfigVector = vector<SyncConfig>;
@@ -244,9 +293,55 @@ struct UnifiedSync
     // Update state and signal to application
     void changeState(SyncError newSyncError, bool newEnableFlag, bool notifyApp, bool keepSyncDb);
 
+    /**
+     * @brief A wrapper around changeState that also makes sure mSync gets reset
+     */
+    void suspendSync();
+
+    /**
+     * @brief A wrapper around enableSyncByBackupId if the sync is not running
+     *
+     * @param completion callback to forward to enableSyncByBackupId
+     */
+    void resumeSync(std::function<void(error, SyncError, handle)>&& completion);
+
     shared_ptr<bool> sdsUpdateInProgress;
 
     PerSyncStats lastReportedDisplayStats;
+
+    /**
+     * @brief Check if the associated sync should work with a database for the statecachetable
+     *
+     * @return true if it should, false otherwise
+     */
+    bool shouldHaveDatabase() const;
+
+    /**
+     * @brief Changes all the necessary attributes in the sync config required to make effective the
+     * change in the local path the sync is using as root.
+     *
+     * These changes include:
+     * - Modify the mConfig member (specifically, its mLocalPath, mLocalPathFsid,
+     *   mFilesystemFingerprint members)
+     * - Commit config changes into the database
+     * - Rename the local nodes database to the new expected path
+     *
+     * @note This can only be called on suspended/disabled syncs.
+     *
+     * If an error different from NO_SYNC_ERROR is returned, it is guaranteed that no fields in the
+     * config were changed and the database with local nodes was not renamed.
+     *
+     * @param newPath The new path to be set.
+     * @return An error code indicating if the operation succeeded or the reason for the error:
+     * - UNKNOWN_ERROR: If the sync is running when this method gets called.
+     * - FILESYSTEM_ID_UNAVAILABLE: We can't get the file system id.
+     * - LOCAL_FILESYSTEM_MISMATCH: When changing the root path we don't allow to change the file
+     *   system the new path is in.
+     * - UNABLE_TO_RETRIEVE_ROOT_FSID: The new path cannot be opened.
+     * - SYNC_CONFIG_WRITE_FAILURE: It failed to write the configuration into the database.
+     * - NO_SYNC_ERROR: The operation succeeded.
+     */
+    SyncError changeConfigLocalRoot(const LocalPath& newPath);
 
 private:
     friend class Sync;
@@ -335,6 +430,8 @@ struct SyncRow
 
     // Does this row represent a "no name" triplet?
     bool isNoName() const;
+
+    void reassignFingerprints();
 };
 
 struct SyncPath
@@ -395,13 +492,16 @@ public:
 
     // Remember which Nodes we created from upload,
     // until the corresponding LocalNodes are updated.
-    void addExpectedUpload(NodeHandle parentHandle, const string& name, weak_ptr<SyncUpload_inClient>);
-    void removeExpectedUpload(NodeHandle parentHandle, const string& name);
-    shared_ptr<SyncUpload_inClient> isNodeAnExpectedUpload(NodeHandle parentHandle, const string& name);
+    void addExpectedUpload(NodeHandle parentHandle,
+                           const string& name,
+                           weak_ptr<SyncUpload_inClient>);
+    virtual void removeExpectedUpload(NodeHandle parentHandle, const string& name);
+    shared_ptr<SyncUpload_inClient> isNodeAnExpectedUpload(NodeHandle parentHandle,
+                                                           const string& name);
 
-    void transferBegin(direction_t direction, m_off_t numBytes);
-    void transferComplete(direction_t direction, m_off_t numBytes);
-    void transferFailed(direction_t direction, m_off_t numBytes);
+    virtual void transferBegin(direction_t direction, m_off_t numBytes);
+    virtual void transferComplete(direction_t direction, m_off_t numBytes);
+    virtual void transferFailed(direction_t direction, m_off_t numBytes);
 
     // Return a snapshot of this sync's current transfer counts.
     SyncTransferCounts transferCounts() const;
@@ -414,9 +514,23 @@ public:
     LocalPath syncTmpFolder() const;
     void setSyncTmpFolder(const LocalPath&);
 
-    SyncThreadsafeState(handle backupId, MegaClient* client, bool canChangeVault) : mClient(client), mBackupId(backupId), mCanChangeVault(canChangeVault)  {}
-    handle backupId() const { return mBackupId; }
-    MegaClient* client() const { return mClient; }
+    SyncThreadsafeState(handle backupId, MegaClient* client, bool canChangeVault):
+        mClient(client),
+        mBackupId(backupId),
+        mCanChangeVault(canChangeVault)
+    {}
+
+    virtual ~SyncThreadsafeState(){};
+
+    handle backupId() const
+    {
+        return mBackupId;
+    }
+
+    MegaClient* client() const
+    {
+        return mClient;
+    }
 };
 
 class MEGA_API Sync
@@ -475,8 +589,20 @@ public:
     // process all outstanding filesystem notifications (mark sections of the sync tree to visit)
     dstime procscanq();
 
-    // helper for checking moves etc
-    bool checkIfFileIsChanging(FSNode& fsNode, const LocalPath& fullPath);
+    /**
+     * @brief This function returns a value to be checked in order to prevent moving/uploading files
+     * that may still being updated
+     *
+     * @note In case you call this method for the first time for a given path it will be
+     * unitialized, so it will return nullopt. In that case this function needs to be called again
+     * in the future.
+     *
+     * @param fsNode a reference to `FsNode` that represents the file you want to check
+     * @param fullPath The absolute local path of the file that need to be checked
+     * @return nullopt in case cache for this localPath is unitialized, `true` in case localPath is
+     * still changing or changed too recently. `False` otherwise
+     */
+    std::optional<bool> checkIfFileIsChanging(const FSNode& fsNode, const LocalPath& fullPath);
 
     // look up LocalNode relative to localroot
     LocalNode* localnodebypath(LocalNode*, const LocalPath&, LocalNode** parent, LocalPath* outpath, bool fromOutsideThreadAlreadyLocked);
@@ -592,8 +718,31 @@ public:
     // How deep is this sync's cloud root?
     unsigned mCurrentRootDepth = 0;
 
-    Sync(UnifiedSync&, const string&, const LocalPath&, bool, const string& logname, SyncError& e);
+    /**
+     * @brief Sync constructor
+     *
+     * @param[in,out] us the `UnifiedSync` object in which the new Sync will be stored. It is used
+     * to read the configuration and instantiate the Sync accordingly. Also, non-const references to
+     * some of its members (e.g. `syncs`) are also saved in the object. Additionally, some members
+     * of the config (owned by the `UnifiedSync`) are also modified inside this constructor.
+     * @param[in] logname A prefix to include in the logging messages involving this object.
+     * @param[out] e An output error code. If the object is constructed successfully, NO_SYNC_ERROR
+     */
+    Sync(UnifiedSync& us, const std::string& logname, SyncError& e);
+
     ~Sync();
+
+    /**
+     * @brief Checks if this sync should have a database, in that case tries to open it if it
+     * already exists and tries to create it if it doesn't
+     *
+     * Note: this method will reset the statecachetable member with a pointer to the DBTable if
+     * everything went well.
+     *
+     * @param errorHandler a function to be called if something went wrong while opening the db
+     * @return true if we ended up with an opened database, false otherwise
+     */
+    bool openOrCreateDb(DBErrorCallback&& errorHandler);
 
     // Asynchronous scan request / result.
     std::shared_ptr<ScanService::ScanRequest> mActiveScanRequestGeneral;
@@ -628,6 +777,18 @@ public:
     // True if this sync should have a state cache database.
     bool shouldHaveDatabase() const;
 
+    /**
+     * @brief Check if this sync has any pending transfer attached to any of its local nodes
+     *
+     * @return true if there are pending transfers, false otherwise
+     */
+    bool hasPendingTransfers() const
+    {
+        return localroot != nullptr && localroot->hasPendingTransfers();
+    }
+
+    bool hasPendingTransfersThreadSafeState() const;
+
     // What filesystem is this sync running on?
     const fsfp_t& fsfp() const;
 
@@ -642,7 +803,7 @@ protected :
     void readstatecache();
 
 private:
-    LocalPath mLocalPath;
+    const LocalPath& mLocalPath;
 
     // permanent lock on the debris/tmp folder
     void createDebrisTmpLockOnce();
@@ -761,10 +922,11 @@ private:
      * @param downloadFile The SyncDownload_inClient object that has being terminated by the
      * corresponding Transfer.
      * @param monitor The ProgressingMonitor object that is used to notify stalls if needed.
-     * @return Always false as we don't want to execute the rest of the syncItem method. Why?
-     * because terminated transfers with unhandled error codes are reset inside
-     * transferResetUnlessMatched which then forces the transfer to be created again and the
-     * download gets automatically restarted. We want to avoid that in this unexpected scenarios.
+     * @return false until file with a newer modification time is detected in the target local
+     * location or the node in the cloud gets updated. Why false? Because terminated transfers with
+     * unhandled error codes are reset inside transferResetUnlessMatched which then forces the
+     * transfer to be created again and the download gets automatically restarted. We want to avoid
+     * that in this unexpected scenarios.
      */
     bool handleTerminatedDownloadsDueUnknown(const SyncRow& row,
                                              const SyncPath& fullPath,
@@ -1023,16 +1185,21 @@ struct SyncStallEntry
     StallLocalPath localPath1;
     StallLocalPath localPath2;
 
-    SyncStallEntry(SyncWaitReason r, bool immediate, bool dueTocloudSideChange, StallCloudPath&& cp1, StallCloudPath&& cp2, StallLocalPath&& lp1, StallLocalPath&& lp2)
-        : reason(r)
-        , alertUserImmediately(immediate)
-        , detectionSideIsMEGA(dueTocloudSideChange)
-        , cloudPath1(move(cp1))
-        , cloudPath2(move(cp2))
-        , localPath1(move(lp1))
-        , localPath2(move(lp2))
-    {
-    }
+    SyncStallEntry(SyncWaitReason r,
+                   bool immediate,
+                   bool dueTocloudSideChange,
+                   StallCloudPath&& cp1,
+                   StallCloudPath&& cp2,
+                   StallLocalPath&& lp1,
+                   StallLocalPath&& lp2):
+        reason(r),
+        alertUserImmediately(immediate),
+        detectionSideIsMEGA(dueTocloudSideChange),
+        cloudPath1(std::move(cp1)),
+        cloudPath2(std::move(cp2)),
+        localPath1(std::move(lp1)),
+        localPath2(std::move(lp2))
+    {}
 };
 
 struct SyncStallInfo
@@ -1145,7 +1312,7 @@ public:
 
 struct SyncProblems
 {
-    list<NameConflict> mConflicts;
+    SyncIDtoConflictInfoMap mConflictsMap;
     SyncStallInfo mStalls;
     bool mConflictsDetected = false;
     bool mStallsDetected = false;
@@ -1244,8 +1411,43 @@ struct Syncs
 
     void transferPauseFlagsUpdated(bool downloadsPaused, bool uploadsPaused);
 
-    // returns a copy of the config, for thread safety
-    bool syncConfigByBackupId(handle backupId, SyncConfig&) const;
+private:
+    /**
+     * @brief Searches for a SyncConfig with the given backupID and executes an optional action
+     * callback.
+     *
+     * This method is expected to be called out of the sync thread.
+     *
+     * Acquires the lock on mSyncVec, searches for a SyncConfig with the given backupId,
+     * and if found, invokes the provided callable under lock.
+     *
+     * @tparam SyncConfigCallable Callable type that accepts a SyncConfig type param.
+     * @param backupId The backupID to search for.
+     * @param completion A callable that is invoked with the SyncConfig if a match is found.
+     *                   If set to nullptr, no callback is executed.
+     * @return true if a matching SyncConfig was found, false otherwise.
+     */
+    template<typename SyncConfigCallable>
+    bool ifFoundSyncConfigByBackupId(const handle backupId, SyncConfigCallable&& action) const;
+
+public:
+    /**
+     * @brief Checks whether a sync configuration with the specified backupID exists.
+     *
+     * @return true if a matching SyncConfig was found, false otherwise.
+     * @see findSyncConfigByBackupId()
+     */
+    bool hasSyncConfigByBackupId(const handle backupId) const;
+
+    /**
+     * @brief Retrieves a copy of the sync configuration if exists for the specified backupID.
+     *
+     * @param syncConfig Output parameter that receives the found configuration (copied for thread
+     * safety).
+     * @return true if a matching SyncConfig was found, false otherwise.
+     * @see findSyncConfigByBackupId()
+     */
+    bool syncConfigByBackupId(const handle backupId, SyncConfig& syncConfig) const;
 
     void purgeRunningSyncs();
     void loadSyncConfigsOnFetchnodesComplete(bool resetSyncConfigStore);
@@ -1342,9 +1544,29 @@ private:  // anything to do with loading/saving/storing configs etc is done on t
     // Load internal sync configs from disk.
     error syncConfigStoreLoad(SyncConfigVector& configs);
 
-    // updates in state & error
-    void saveSyncConfig(const SyncConfig& config);
+    /**
+     * @brief Ensures the specified external drive is opened and marks it as dirty in the sync
+     * configuration store.
+     *
+     * This function checks whether the external drive at the given local path is known to the
+     * synchronization configuration store. If the drive is not already known (i.e., the application
+     * hasn't opened it yet), the function opens the drive to load any existing sync configurations.
+     * After ensuring the drive is opened, it marks the drive as dirty in the sync configuration
+     * store.
+     *
+     * @param externalDrivePath The local path to the external drive that needs to be opened and
+     * marked as dirty.
+     */
+    void ensureDriveOpenedAndMarkDirty(const LocalPath& externalDrivePath);
 
+    /**
+     * @brief Marks the externalDrivePath stored in the config as dirty and calls the
+     * syncConfigStoreFlush method to ensure the configuration is written into the database.
+     *
+     * @param config The configuration to store
+     * @return true if the operation succeed (the config was stored in the db), false otherwise
+     */
+    bool commitConfigToDb(const SyncConfig& config);
 
 public:
 
@@ -1357,13 +1579,69 @@ public:
     // maps local fsid to corresponding LocalNode* (s)
     fsid_localnode_map localnodeBySyncedFsid;
     fsid_localnode_map localnodeByScannedFsid;
-    LocalNode* findLocalNodeBySyncedFsid(const fsfp_t& fsfp, mega::handle fsid, const LocalPath& originalpath, nodetype_t type, const FileFingerprint& fp,
-                                         std::function<bool(LocalNode* ln)> extraCheck, handle owningUser, bool& foundExclusionUnknown);
-    LocalNode* findLocalNodeByScannedFsid(const fsfp_t& fsfp, mega::handle fsid, const LocalPath& originalpath, nodetype_t type, const FileFingerprint* fp,
-                                         std::function<bool(LocalNode* ln)> extraCheck, handle owningUser, bool& foundExclusionUnknown);
 
-    void setSyncedFsidReused(const fsfp_t& fsfp, mega::handle fsid);
-    void setScannedFsidReused(const fsfp_t& fsfp, mega::handle fsid);
+    /**
+     * @brief Finds a LocalNode by its synced FSID.
+     *
+     * Searches for a LocalNode in the map of synced FSIDs.
+     * This is used to detect moves, while avoiding mismatches caused by FSID reuse.
+     *
+     * @param fsid The FSID of the node to be searched on the localnode map.
+     * @param targetNodeAttributes The necessary node attributes of the node looking for another
+     * node matching by FSID.
+     * @param originalPathForLogging The original path being processed for context in logs.
+     * @param extraCheck An optional callable for additional filtering of LocalNodes.
+     * @param onFingerprintMismatchDuringPutnodes Optional operation for a LocalNode that
+     * has been excluded due to fingerprint mismatch, but the source node has a putnodes operation
+     * ongoing for an upload which matches fingerprint with the target node.
+     * The param is not const intentionally, in case it needs to be considered as a potential
+     * source node, taking into account that there is a fingerprint match for the ongoing upload.
+     *
+     * @return A pair with:
+     *         bool - indicating whether an unknown exclusion was encountered. This may occur during
+     * eg. the first pass of the tree after loading from Suspended state and the corresponding node
+     * is later in the tree. The caller should decide whether to pospone the logic if an unknown
+     * exclusion was found for some node.
+     *         LocalNode* - pointer to the matching LocalNode, or nullptr if no match is found.
+     *
+     * @see findLocalNodeByFsid()
+     */
+    std::pair<bool, LocalNode*> findLocalNodeBySyncedFsid(
+        const handle fsid,
+        const NodeMatchByFSIDAttributes& targetNodeAttributes,
+        const LocalPath& originalPathForLogging,
+        std::function<bool(const LocalNode&)> extraCheck = nullptr,
+        std::function<void(LocalNode*)> onFingerprintMismatchDuringPutnodes = nullptr) const;
+
+    /**
+     * @brief Finds a LocalNode by its scanned FSID.
+     *
+     * Searches for a LocalNode in the map of scanned FSIDs. This is used to detect
+     * moves and avoid mismatches caused by FSID reuse.
+     *
+     * @param fsid The FSID of the node to be searched on the localnode map.
+     * @param targetNodeAttributes The necessary node attributes of the node looking for another
+     * node matching by FSID.
+     * @param originalPathForLogging The original path being processed for context in logs.
+     * @param extraCheck An optional callable for additional filtering of LocalNodes.
+     *
+     * @return A pair with:
+     *         bool - indicating whether an unknown exclusion was encountered. This may occur during
+     * eg. the first pass of the tree after loading from Suspended state and the corresponding node
+     * is later in the tree. The caller should decide whether to pospone the logic if an unknown
+     * exclusion was found for some node.
+     *         LocalNode* - pointer to the matching LocalNode, or nullptr if no match is found.
+     *
+     * @see findLocalNodeByFsid()
+     */
+    std::pair<bool, LocalNode*> findLocalNodeByScannedFsid(
+        const handle fsid,
+        const NodeMatchByFSIDAttributes& targetNodeAttributes,
+        const LocalPath& originalPathForLogging,
+        std::function<bool(const LocalNode&)> extraCheck = nullptr) const;
+
+    void setSyncedFsidReused(const fsfp_t& fsfp, const handle fsid);
+    void setScannedFsidReused(const fsfp_t& fsfp, const handle fsid);
 
     // maps nodehandle to corresponding LocalNode* (s)
     nodehandle_localnode_map localnodeByNodeHandle;
@@ -1373,8 +1651,20 @@ public:
     // backupId of UNDEF to rescan all
     void setSyncsNeedFullSync(bool andFullScan, bool andReFingerprint, handle backupId);
 
-    // retrieves information about any detected name conflicts.
-    bool conflictsDetected(list<NameConflict>& conflicts); // This one resets syncupdate_totalconflicts
+    /**
+     * @brief Detects name conflicts in the synchronizations and stores them in a Map.
+     *
+     * Additionally, this function updates the global conflict counter, and
+     * disables sync conflicts update flag
+     *
+     * @note This function must be executed on the sync thread.
+     *
+     * @param conflicts Map (BackupId to list of conficts) where detected conflicts are stored.
+     *
+     * @return Returns true if conflicts were detected and stored in the map, otherwise returns
+     * false.
+     */
+    bool conflictsDetected(SyncIDtoConflictInfoMap& conflicts);
     size_t conflictsDetectedCount(size_t limit = 0) const; // limit 0 -> no limit
 
     // Get name conficts - pass UNDEF to collect for all syncs.
@@ -1398,10 +1688,99 @@ public:
     void queueSync(std::function<void()>&&, const string& actionName);
     void queueClient(QueuedClientFunc&&, bool fromAnyThread = false);
 
+    enum class FromAnyThread
+    {
+        yes,
+        no
+    };
+
+    /**
+     * @brief Wraps the given callable inside another callable (same signature) that, once invoked,
+     * instead of running it immediately, it gets enqueued to be executed in the MegaClient thread.
+     *
+     * @tparam Callable A type implementing operator(). The return type of the callable must be void
+     * @param callable The callable to wrap
+     * @param fromAnyThread If the callable can be enqueued from any thread (FromAnyThread::yes) or
+     * if it should be done only from the sync thread.
+     * @return A new callable that will enqueue the input parameter to the MegaClient thread.
+     */
+    template<typename Callable>
+    auto wrapToRunInClientThread(Callable&& callable,
+                                 const FromAnyThread fromAnyThread = FromAnyThread::no)
+    {
+        return [this,
+                fromAnyThread = fromAnyThread == FromAnyThread::yes,
+                callable = std::forward<Callable>(callable)](auto&&... args) mutable
+        {
+            auto argsTuple = std::make_tuple(std::forward<decltype(args)>(args)...);
+            queueClient(
+                [callable = std::move(callable), argsTuple = std::move(argsTuple)](auto&&,
+                                                                                   auto&&) mutable
+                {
+                    std::apply(callable, std::move(argsTuple));
+                },
+                fromAnyThread);
+        };
+    }
+
     bool onSyncThread() const { return std::this_thread::get_id() == syncThreadId; }
 
-    // Update remote location
-    bool checkSyncRemoteLocationChange(UnifiedSync&, bool exists, string cloudPath);
+    /**
+     * @brief Checks if the new remote root path has changed. In that case,
+     * config.mOriginalPathOfRemoteRootNode gets updated.
+     *
+     * Also ensures that the config.mRemoteNode is undefined if the remote root doesn't exist
+     * anymore.
+     *
+     * @param config A configuration to read the previously stored remote root node
+     * @param exists Whether the remote root node continues existing
+     * @param cloudPath The current path of the remote root node
+     * @return true if the remote mOriginalPathOfRemoteRootNode has changed, false otherwise
+     */
+    bool checkSyncRemoteLocationChange(SyncConfig& config,
+                                       const bool exists,
+                                       const std::string& cloudPath);
+
+    /**
+     * @brief Change the root node in the cloud the sync with the given backupId is tracking
+     *
+     * @note This method must be called from the MegaClient thread.
+     *
+     * @param backupId Id of the sync to change the remote root node
+     * @param newRootNode The new root's node handle
+     * @param completionForClient The completion function to be called after the operations finishes
+     * or if some error takes place.
+     */
+    void changeSyncRemoteRoot(const handle backupId,
+                              std::shared_ptr<const Node>&& newRootNode,
+                              std::function<void(error, SyncError)>&& completionForClient);
+
+    /**
+     * @brief Same as changeSyncRemoteRoot but this must be called from the syncs thread.
+     */
+    void changeSyncRemoteRootInThread(const handle backupId,
+                                      std::shared_ptr<const Node>&& newRootNode,
+                                      std::function<void(error, SyncError)>&& completion);
+
+    /**
+     * @brief Change the local path being used as the root of a sync
+     *
+     * @param backupId Id of the sync to change the remote root node
+     * @param newValidLocalRootPath The path to the new local root. It is supposed to be valid,
+     * i.e., all the requirements stated at MegaClient's level have been validated.
+     * @param completionForClient The completion function to be called after the operations finishes
+     * or if some error takes place.
+     */
+    void changeSyncLocalRoot(const handle backupId,
+                             LocalPath&& newValidLocalRootPath,
+                             std::function<void(error, SyncError)>&& completionForClient);
+
+    /**
+     * @brief Same as changeSyncLocalRoot but this must be called from the syncs thread.
+     */
+    void changeSyncLocalRootInThread(const handle backupId,
+                                     LocalPath&& newValidLocalRootPath,
+                                     std::function<void(error, SyncError)>&& completion);
 
     // Cause periodic-scan syncs to scan now (waiting for the next periodic scan is impractical for tests)
     std::future<size_t> triggerPeriodicScanEarly(handle backupID);
@@ -1443,8 +1822,6 @@ public:
     std::chrono::steady_clock::time_point lastSyncStallsCount{std::chrono::steady_clock::now()};
     static const std::chrono::milliseconds MIN_DELAY_BETWEEN_SYNC_STALLS_OR_CONFLICTS_COUNT;
     static const std::chrono::milliseconds MAX_DELAY_BETWEEN_SYNC_STALLS_OR_CONFLICTS_COUNT;
-    static const std::chrono::milliseconds MIN_DELAY_BETWEEN_SYNC_VERBOSE_TIMED; // 5 secs
-    static const std::chrono::milliseconds TIME_WINDOW_FOR_SYNC_VERBOSE_TIMED; // 1 sec
 
     // Lock-free count of syncs currently active.
     std::atomic<unsigned> mNumSyncsActive{0u};
@@ -1485,10 +1862,23 @@ private:
     bool checkSyncsScanningWasComplete_inThread(); // Iterate through syncs, calling Sync::checkScanningWasComplete(). Returns false if any sync returns false.
     void unsetSyncsScanningWasComplete_inThread(); // Unset scanningWasComplete flag for every sync.
 
-    // actually start the sync (on sync thread)
-    void startSync_inThread(UnifiedSync& us, const string& debris, const LocalPath& localdebris,
-        bool inshare, bool isNetwork, const LocalPath& rootpath,
-        std::function<void(error, SyncError, handle)> completion, const string& logname);
+    /**
+     * @brief Instantiates the Sync object and stores it in the given unified sync
+     *
+     * @param[in,out] us The UnifiedSync with the configuration needed to create the sync (mConfig).
+     * It will be modified to store the new sync and to modify its state depending on the results.
+     * @param completion A function to be called once the process finishes with or without errors.
+     * The parameter passed to the callable are:
+     * - `error`: An error code indicating the result of the initiation.
+     * - `SyncError`: A detailed sync error code providing more context.
+     * - `handle`: the backup id of the sync being initiated
+     * @param logname The name to be passed to the Sync constructor. That will be stored in the
+     * `Sync::syncname` member and used as prefix in the logged messages.
+     */
+    void startSync_inThread(UnifiedSync& us,
+                            std::function<void(error, SyncError, handle)> completion,
+                            const string& logname);
+
     void prepareForLogout_inThread(bool keepSyncsConfigFile, std::function<void()> clientCompletion);
     void locallogout_inThread(bool removecaches, bool keepSyncsConfigFile, bool reopenStoreAfter);
     void loadSyncConfigsOnFetchnodesComplete_inThread(bool resetSyncConfigStore);
@@ -1531,6 +1921,14 @@ private:
             WhichCloudVersion,
             handle* owningUser = nullptr,
             vector<pair<handle, int>>* sdsBackups = nullptr);
+
+    /**
+     * @brief Check if the given cloud node is an in-share
+     *
+     * @param cn The cloud node to check
+     * @return true if the node is found and it is an inshare
+     */
+    bool isCloudNodeInShare(const CloudNode& cn);
 
     bool lookupCloudChildren(NodeHandle h, vector<CloudNode>& cloudChildren);
 
@@ -1661,6 +2059,15 @@ private:
 
     void confirmOrCreateDefaultMegaignore(bool transitionToMegaignore, unique_ptr<DefaultFilterChain>& resultIfDfc, unique_ptr<string_vector>& resultIfMegaignoreDefault);
 
+    /**
+     * @brief Handles how to deal with a sync whose remote root node has been moved or renamed
+     *
+     * @note This method assumes that the location of the remote node has changed.
+     *
+     * @param sync The affected sync. Its state might be changed
+     */
+    void manageRemoteRootLocationChange(Sync& sync) const;
+
     // ------ private data members
 
     MegaClient& mClient;
@@ -1700,7 +2107,12 @@ private:
     // When the node tree changes, this structure lets the sync code know which LocalNodes need to be flagged
     map<NodeHandle, bool> triggerHandles;
     map<LocalPath, bool> triggerLocalpaths;
-    mutex triggerMutex;
+    mutable std::mutex triggerMutex;
+
+public:
+    bool triggerHandlesPending() const;
+
+    bool triggerLocalpathsPending() const;
 
     // Keep track of files that we can't move yet because they are changing
     struct FileChangingState
@@ -1709,6 +2121,11 @@ private:
         m_off_t updatedfilesize = ~0;
         m_time_t updatedfilets = 0;
         m_time_t updatedfileinitialts = 0;
+
+        bool isInitialized() const
+        {
+            return updatedfilesize != ~0 || updatedfilets != 0 || updatedfileinitialts != 0;
+        }
     };
     std::map<LocalPath, FileChangingState> mFileChangingCheckState;
 
@@ -1724,6 +2141,18 @@ private:
     std::atomic<bool> mDownloadsPaused {false};
     std::atomic<bool> mUploadsPaused {false};
     std::atomic<bool> mTransferPauseFlagsChanged {false};
+
+    // Local sds values for full-syncs
+    using SyncsDesiredStates = std::vector<std::pair<handle, int>>;
+    SyncsDesiredStates mSdsBackupsFullSync;
+    mutable std::mutex mSdsBackupsFullSyncMutex;
+
+    /**
+     * @brief Shared pointer to IUploadThrottlingManager, in charge of everything related to upload
+     * throttling.
+     * @see IUploadThrottlingManager.
+     */
+    std::shared_ptr<IUploadThrottlingManager> mThrottlingManager;
 
     // Responsible for tracking when to send sync/backup heartbeats
     unique_ptr<BackupMonitor> mHeartBeatMonitor;
@@ -1826,6 +2255,158 @@ public:
         // Let the caller know if any syncs match our predicate.
         return notifier.get_future().get();
     }
+
+    // Syncs Upload Throttling
+
+    /**
+     * @brief Processes the delayed uploads.
+     * Expected to be called on the sync thread.
+     *
+     * When a delayed upload is processed after the required throttling time, it is enqueued as a
+     * regular upload to be processed in the client.
+     *
+     * @see IUploadThrottlingManager::processDelayedUploads()
+     * @see queueClient()
+     */
+    void processDelayedUploads();
+
+    /**
+     * @see IUploadThrottlingManager::addToDelayedUploads()
+     * Expected to be called on the sync thread.
+     */
+    void addToDelayedUploads(DelayedSyncUpload&& delayedUpload);
+
+    /**
+     * @see IUploadThrottlingManager::uploadCounterInactivityExpirationTime()
+     * Expected to be called on the sync thread.
+     */
+    std::chrono::seconds uploadCounterInactivityExpirationTime() const;
+
+    /**
+     * @see IUploadThrottlingManager::throttleUpdateRate()
+     * Expected to be called on the sync thread.
+     */
+    std::chrono::seconds throttleUpdateRate() const;
+
+    /**
+     * @see IUploadThrottlingManager::maxUploadsBeforeThrottle()
+     * Expected to be called on the sync thread.
+     */
+    unsigned maxUploadsBeforeThrottle() const;
+
+    /**
+     * @brief Sets the throttleUpdateRate configurable value for upload throttling.
+     *
+     * Method to be executed out of the sync thread. The logic is enqueued to be later called within
+     * the sync thread.
+     *
+     * @param completion The completion function to be called after the operations finishes.
+     * Error values:
+     * - API_OK: Value was updated correctly.
+     * - API_EARGS: Value was below or above throttleUpdateRate lower/upper limits.
+     */
+    void setThrottleUpdateRate(std::chrono::seconds throttleUpdateRate,
+                               std::function<void(const error)>&& completion);
+
+    /**
+     * @brief Sets the maxUploadsBeforeThrottle configurable value for upload throttling.
+     *
+     * Method to be executed out of the sync thread. The logic is enqueued to be later called within
+     * the sync thread.
+     *
+     * @param completion The completion function to be called after the operations finishes.
+     * Error values:
+     * - API_OK: Value was updated correctly.
+     * - API_EARGS: Value was below or above maxUploadsBeforeThrottle lower/upper limits.
+     */
+    void setMaxUploadsBeforeThrottle(const unsigned maxUploadsBeforeThrottle,
+                                     std::function<void(const error)>&& completion);
+
+    /**
+     * @brief Retrieves the upload throttling configurable values: throttleUpdateRate and
+     * maxUploadsBeforeThrottle.
+     *
+     * Method to be executed out of the sync thread. The logic is enqueued to be later called within
+     * the sync thread.
+     *
+     * @param completion The completion function to be called after the operations finishes.
+     * @return a pair with throttleUpdateRate, maxUploadsBeforeThrottle.
+     */
+    void uploadThrottleValues(
+        std::function<void(const std::chrono::seconds /* throttleUpdateRate */,
+                           const unsigned /* maxUploadsBeforeThrottle */)>&& completion);
+
+    /**
+     * @brief Retrieves the lower/upper limits for the upload throttling configurable values.
+     *
+     * Method to be executed out of the sync thread. The logic is enqueued to be later called within
+     * the sync thread.
+     *
+     * @param completion The completion function to be called after the operations finishes.
+     */
+    void uploadThrottleValuesLimits(std::function<void(ThrottleValueLimits&&)>&& completion);
+
+    /**
+     * @brief Checks whether or not there are delayed/throttled uploads waiting for processing.
+     *
+     * Method to be executed out of the sync thread. The logic is enqueued to be later called within
+     * the sync thread.
+     *
+     * @param completion The completion function to be called after the operations finishes.
+     */
+    void checkSyncUploadsThrottled(std::function<void(const bool)>&& completion);
+
+    /**
+     * @brief Sets the throttling manager object.
+     *
+     * Method to be executed out of the sync thread. The logic is enqueued to be later called within
+     * the sync thread.
+     *
+     * @param uploadThrottlingManager A valid shared_ptr to IUploadThrottlingManager.
+     * @param completion The completion function to be called after the operations finishes.
+     * Error values:
+     * - API_OK: New IUploadThrottlingManager was set correctly.
+     * - API_EARGS: uploadThrottlingManager is not a valid pointer.
+     */
+    void setThrottlingManager(std::shared_ptr<IUploadThrottlingManager> uploadThrottlingManager,
+                              std::function<void(const error)>&& completion);
+
+    /**
+     * @brief Sets the sds value for the syncs
+     *
+     * Method to be executed out of the sync thread. The value will be copied to be used later in
+     * the sync thread, protected by the mSdsBackupsFullSyncMutex mutex.
+     *
+     * @param sds New *!sds user attribute value. It can be null.
+     */
+    void setSdsBackupsFullSync(const std::unique_ptr<string_map>& sds);
+
+private:
+    /**
+     * @brief Checks the throttling manager validity.
+     *
+     * The throttling manager is always expected to be valid since the constructor.
+     * The method writes a log error and also performs an assert in case of the throttling manager
+     * being nullptr.
+     *
+     * This method is expected to be called on the sync thread. It also asserts that.
+     */
+    void assertThrottlingManagerIsValid() const;
+
+    /**
+     * @brief Gets the sds value for the full-sync with the sds node attribute format
+     *
+     * Internal method intended to be used in the sync thread. The returned values are set using
+     * setSdsBackupsFullSync method. Protected by the mSdsBackupsFullSyncMutex
+     *
+     * @see setSdsBackupsFullSync
+     *
+     * @return vector with the latest known *!sds user attribute values.
+     */
+    SyncsDesiredStates getSdsBackupsFullSync() const;
+
+public:
+    bool anySyncHasPendingTransfersThreadSafeState() const;
 };
 
 class OverlayIconCachedPaths
@@ -1886,7 +2467,6 @@ public:
         paths.clear();
     }
 };
-
 
 } // namespace
 

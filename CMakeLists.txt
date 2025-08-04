@@ -14,21 +14,15 @@
 #    target_link_libraries(<target> PRIVATE PkgConfig::SDKlib)
 #
 
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.20)
 
 # Qt Creator configures VCPKG automatically. Disable it, we may want to use different tripplets, paths...
 set(QT_CREATOR_SKIP_VCPKG_SETUP TRUE CACHE BOOL "")
 
 # Main modules location
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/contrib/cmake/modules)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake/modules)
 
 set(VCPKG_ROOT "" CACHE PATH "If set, it will build and use the VCPKG packages defined in the manifest file")
-
-# Set up CMAKE_SYSTEM_NAME for cross compiling
-if (VCPKG_ROOT)
-    include(set_cmake_system_name)
-    set_cmake_system_name()
-endif()
 
 ## Configurable options ##
 include(sdklib_options)
@@ -37,8 +31,8 @@ include(sdklib_options)
 if(NOT PROJECT_NAME)
     message(STATUS "[SDKlib] is a top-level project. Install target is enabled by default.")
     set(SDKLIB_STANDALONE 1)
-    if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
-        message(STATUS "Examples and tests will not be enabled by default.")
+    if (CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+        message(STATUS "Examples and tests will not be enabled by default for ${CMAKE_SYSTEM_NAME} builds")
         option(ENABLE_SDKLIB_EXAMPLES "Example application is built if enabled" OFF)
         option(ENABLE_SDKLIB_TESTS "Integration and unit tests are built if enabled" OFF)
     else()
@@ -46,11 +40,7 @@ if(NOT PROJECT_NAME)
         option(ENABLE_SDKLIB_EXAMPLES "Example application is built if enabled" ON)
         option(ENABLE_SDKLIB_TESTS "Integration and unit tests are built if enabled" ON)
     endif()
-    if (WIN32)
-        option(ENABLE_SDKLIB_WERROR "Enable warnings as errors" ON)
-    else()
-        option(ENABLE_SDKLIB_WERROR "Enable warnings as errors when building in debug mode." OFF)
-    endif()
+    option(ENABLE_SDKLIB_WERROR "Enable warnings as errors" ON)
 else()
     message(STATUS "[SDKlib] is building under project [${PROJECT_NAME}] Install target, examples and tests will not be enabled by default.")
     set(SDKLIB_STANDALONE 0)
@@ -67,10 +57,10 @@ if(NOT PROJECT_NAME)
     if(VCPKG_ROOT)
         # Include VCPKG management tools.
         include(vcpkg_management)
-        process_vcpkg_libraries(${CMAKE_CURRENT_LIST_DIR}/contrib/cmake)
+        process_vcpkg_libraries(${CMAKE_CURRENT_LIST_DIR}/cmake)
     else()
         # For packages with no pkg-config in the system.
-        list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/contrib/cmake/modules/packages)
+        list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake/modules/packages)
         message(STATUS "Using system dependencies")
     endif()
 endif()
@@ -90,6 +80,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
 endif()
 
 message(STATUS "Generator: ${CMAKE_GENERATOR}")
+if(CMAKE_SYSTEM_VERSION)
+    message(STATUS "Target OS version: ${CMAKE_SYSTEM_VERSION}")
+endif()
 if(CMAKE_GENERATOR_PLATFORM)
     message(STATUS "Platform: ${CMAKE_GENERATOR_PLATFORM}")
 endif()
@@ -100,6 +93,9 @@ if(APPLE)
         message(STATUS "Architectures: -Not set- (It defaults to the host system architecture)")
     endif()
     message(STATUS "Minimum deployment version: ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(CMAKE_OSX_SYSROOT)
+        message(STATUS "Platform SDK: ${CMAKE_OSX_SYSROOT}")
+    endif()
 endif()
 message(STATUS "Target System Processor: ${CMAKE_SYSTEM_PROCESSOR}")
 message(STATUS "Host System Processor: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
@@ -162,16 +158,6 @@ if(ENABLE_JAVA_BINDINGS)
     add_subdirectory(bindings/java)
 endif()
 
-# Load Python bindings
-if(ENABLE_PYTHON_BINDINGS)
-    add_subdirectory(bindings/python)
-endif()
-
-# Load PHP bindings
-if(ENABLE_PHP_BINDINGS)
-    add_subdirectory(bindings/php)
-endif()
-
 if(ENABLE_ISOLATED_GFX)
     add_subdirectory(tools/gfxworker)
 endif()
@@ -188,3 +174,4 @@ endif()
 ## Load FUSE support.
 include(src/fuse/CMakeLists.txt)
 
+add_subdirectory(third_party)

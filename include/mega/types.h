@@ -69,7 +69,9 @@ namespace mega {
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace mega {
@@ -212,13 +214,19 @@ typedef enum ErrorCodes : int
     API_EAPPKEY = -22,              ///< Invalid or missing application key.
     API_ESSL = -23,                 ///< SSL verification failed
     API_EGOINGOVERQUOTA = -24,      ///< Not enough quota
+    API_EROLLEDBACK = -25, ///< A strongly-grouped request was rolled back.
     API_EMFAREQUIRED = -26,         ///< Multi-factor authentication required
     API_EMASTERONLY = -27,          ///< Access denied for sub-users (only for business accounts)
     API_EBUSINESSPASTDUE = -28,     ///< Business account expired
     API_EPAYWALL = -29,             ///< Over Disk Quota Paywall
+    API_ESUBUSERKEYMISSING = -30, ///< A business error where a subuser has not yet encrypted
+                                  /// their master key for the admin user and tries to perform
+                                  /// a disallowed command (currently u and p)
+
     LOCAL_ENOSPC = -1000,           ///< Insufficient space
     LOCAL_ETIMEOUT = -1001,         ///< A request timed out.
     LOCAL_ABANDONED = -1002,        ///< Request abandoned due to local logout.
+    LOCAL_ENETWORK = -1003, ///< Local network error (DNS resolution failure)
 
     API_FUSE_EBADF = -2000,
     API_FUSE_EISDIR = -2001,
@@ -236,8 +244,23 @@ public:
     typedef enum
     {
         USER_ETD_UNKNOWN = -1,
-        USER_COPYRIGHT_SUSPENSION = 4,  // Account suspended by copyright
-        USER_ETD_SUSPENSION = 7, // represents an ETD/ToS 'severe' suspension level
+        USER_ENABLED = 0,
+        USER_PENDINGCONFIRMATION = 1,
+        USER_SUSPENDED_GENERIC = 2,
+        USER_SUSPENDED_PAYMENT = 3,
+        USER_COPYRIGHT_SUSPENSION = 4,
+        USER_SUSPENDED_ADMIN_FULLDISABLE = 5,
+        USER_SUSPENDED_ADMIN_PARTIALDISABLE = 6,
+        USER_ETD_SUSPENSION = 7,
+        USER_SUSPENDED_SMSVERIFICATIONREQUIRED = 8,
+        USER_SUSPENDED_EMAILVERIFICATIONREQUIRED = 9,
+        USER_SUBACCOUNT_PENDINGCONFIRMATION = 10,
+        USER_SUBACCOUNT_DISABLED = 11,
+        USER_SUBACCOUNT_DELETED = 12,
+        USER_BUSINESSACCOUNT = 20,
+        USER_SUSPENDED_PASSWORD_CHANGE_REQUIRED = 21,
+        USER_EPHEMERAL_RESELLER_USER = 22,
+        USER_SUSPENDED_NOUSER = 99,
     } UserErrorCode;
 
     typedef enum
@@ -278,7 +301,25 @@ enum class PasswordEntryError : uint8_t
     OK = 0,
     PARSE_ERROR,
     MISSING_PASSWORD,
+    MISSING_NAME,
+    MISSING_TOTP_SHARED_SECRET,
+    INVALID_TOTP_SHARED_SECRET,
+    MISSING_TOTP_NDIGITS,
+    INVALID_TOTP_NDIGITS,
+    MISSING_TOTP_EXPT,
+    INVALID_TOTP_EXPT,
+    MISSING_TOTP_HASH_ALG,
+    INVALID_TOTP_HASH_ALG,
+    MISSING_CREDIT_CARD_NUMBER,
+    INVALID_CREDIT_CARD_NUMBER,
+    INVALID_CREDIT_CARD_CVV,
+    INVALID_CREDIT_CARD_EXPIRATION_DATE,
 };
+
+/**
+ * @brief Get a string representation from a PasswordEntryError
+ */
+std::string_view toString(const PasswordEntryError err);
 
 // node/user handles are 8-11 base64 characters, case sensitive, and thus fit
 // in a 64-bit int
@@ -343,6 +384,11 @@ public:
 
     bool eq(NodeOrUploadHandle b) const { return h == b.h && mIsNodeHandle == b.mIsNodeHandle; }
     bool operator<(const NodeOrUploadHandle& rhs) const { return h < rhs.h || (h == rhs.h && int(mIsNodeHandle) < int(rhs.mIsNodeHandle)); }
+
+    handle as8byte() const
+    {
+        return h;
+    }
 };
 
 inline bool operator==(NodeOrUploadHandle a, NodeOrUploadHandle b) { return a.eq(b); }
@@ -406,7 +452,12 @@ const int SETNODEKEYLENGTH = SymmCipher::KEYLENGTH;
 const unsigned MAXNODESUPLOAD = 1000;
 typedef union {
     std::array<byte, FILENODEKEYLENGTH> bytes;
-    struct {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4201) // nameless struct
+#endif
+    struct
+    {
         std::array<byte, FOLDERNODEKEYLENGTH> key;
         union {
             std::array<byte, 8> iv_bytes;
@@ -417,6 +468,9 @@ typedef union {
             uint64_t crc_u64;
         };
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 } FileNodeKey;
 
 const int UPLOADTOKENLEN = 36;
@@ -431,12 +485,9 @@ public:
 
     virtual bool serialize(string*) const = 0;
 
-    uint32_t dbid = 0;
+    uint32_t dbid = 0; // exposed for active transfers via MegaTransfer::getUniqueId
     bool notified = false;
 };
-
-// numeric representation of string (up to 8 chars)
-typedef uint64_t nameid;
 
 // access levels:
 // RDONLY - cannot add, rename or delete
@@ -501,8 +552,8 @@ enum SyncError {
     STORAGE_OVERQUOTA = 9,                  // Account reached storage overquota
     ACCOUNT_EXPIRED = 10,                   // Your plan has expired
     FOREIGN_TARGET_OVERSTORAGE = 11,        // Sync transfer fails (upload into an inshare whose account is overquota)
-    REMOTE_PATH_HAS_CHANGED = 12,           // Remote path has changed (currently unused: not an error)
-    //REMOTE_PATH_DELETED = 13,               // (obsolete -> unified with REMOTE_NODE_NOT_FOUND) Remote path has been deleted
+    REMOTE_PATH_HAS_CHANGED = 12, // (obsolete -> changing remote path is not an error)
+    // REMOTE_PATH_DELETED = 13,               // (obsolete -> unified with REMOTE_NODE_NOT_FOUND)
     SHARE_NON_FULL_ACCESS = 14,             // Existing inbound share sync or part thereof lost full access
     LOCAL_FILESYSTEM_MISMATCH = 15,         // Filesystem fingerprint does not match the one stored for the synchronization
     PUT_NODES_ERROR = 16,                   // Error processing put nodes result
@@ -546,6 +597,8 @@ enum SyncWarning {
     LOCAL_IS_HGFS = 2,                      // Found HGFS (not a failure per se)
 };
 
+// Joins an error code (`error`) with more detailed error/warning codes specific for Syncs
+using SyncErrorInfo = std::tuple<error, SyncError, SyncWarning>;
 
 typedef enum { SYNCDEL_NONE, SYNCDEL_DELETED, SYNCDEL_INFLIGHT, SYNCDEL_BIN,
                SYNCDEL_DEBRIS, SYNCDEL_DEBRISDAY, SYNCDEL_FAILED } syncdel_t;
@@ -742,23 +795,8 @@ typedef map<handle, unique_ptr<PendingContactRequest>> handlepcr_map;
 typedef vector<string> string_vector;
 typedef map<string, string> string_map;
 typedef multimap<int64_t, int64_t> integer_map;
-typedef string_map TLV_map;
 
 typedef map<attr_t, string> userattr_map;
-
-typedef enum {
-
-    AES_CCM_12_16 = 0x00,
-    AES_CCM_10_16 = 0x01,
-    AES_CCM_10_08 = 0x02,
-    AES_GCM_12_16_BROKEN = 0x03, // Same as 0x00 (due to a legacy bug)
-    AES_GCM_10_08_BROKEN = 0x04, // Same as 0x02 (due to a legacy bug)
-    AES_GCM_12_16 = 0x10,
-    AES_GCM_10_08 = 0x11
-
-} encryptionsetting_t;
-
-typedef enum { AES_MODE_UNKNOWN, AES_MODE_CCM, AES_MODE_GCM } encryptionmode_t;
 
 typedef enum { RECOVER_WITH_MASTERKEY = 9, RECOVER_WITHOUT_MASTERKEY = 10, CANCEL_ACCOUNT = 21, CHANGE_EMAIL = 12 } recovery_t;
 
@@ -784,10 +822,9 @@ typedef enum {
     STORAGE_GREEN = 0,      // there is storage is available
     STORAGE_ORANGE = 1,     // storage is almost full
     STORAGE_RED = 2,        // storage is full
-    STORAGE_CHANGE = 3,     // the status of the storage might have changed
+    // STORAGE_CHANGE = 3,     // obsolete (SDK fetches the state and notify directly)
     STORAGE_PAYWALL = 4,    // storage is full and user didn't remedy despite of warnings
 } storagestatus_t;
-
 
 enum SmsVerificationState {
     // These values (except unknown) are delivered from the servers
@@ -861,7 +898,24 @@ typedef enum {
     REASON_ERROR_DB_FULL            = 3,
     REASON_ERROR_DB_INDEX_OVERFLOW  = 4,
     REASON_ERROR_NO_JSCD = 5,
+    REASON_ERROR_REGENERATE_JSCD = 6,
+    REASON_ERROR_DB_CORRUPT = 7,
 } ErrorReason;
+
+// enum matching 1:1 MegaEvent::NetworkActivityChannel
+enum NetworkActivityChannel : int
+{
+    SC,
+    CS,
+};
+
+// enum matching 1:1 MegaEvent::NetworkActivityType
+enum NetworkActivityType : int
+{
+    REQUEST_SENT,
+    REQUEST_RECEIVED,
+    REQUEST_ERROR,
+};
 
 //#define MEGA_MEASURE_CODE   // uncomment this to track time spent in major subsystems, and log it every 2 minutes, with extra control from megacli
 
@@ -900,7 +954,7 @@ namespace CodeCounter
             return s;
         }
 #else
-        ScopeStats(std::string s) {}
+        ScopeStats(std::string) {}
 #endif
     };
 
@@ -959,7 +1013,7 @@ namespace CodeCounter
             }
         }
 #else
-        ScopeTimer(ScopeStats& sm) {}
+        ScopeTimer(ScopeStats&) {}
         void complete() {}
 #endif
     };
@@ -978,6 +1032,7 @@ public:
         STATUS_BLOCKED = 3,
         STATUS_PRO_LEVEL = 4,
         STATUS_FEATURE_LEVEL = 5,
+        STATUS_ROOT_FOLDER_LINK_HANDLE = 6,
     };
 
     CacheableStatus(Type type, int64_t value);
@@ -1093,38 +1148,38 @@ enum class SyncWaitReason {
 
 enum class PathProblem : unsigned short {
     NoProblem = 0,
-    FileChangingFrequently,
-    IgnoreRulesUnknown,
-    DetectedHardLink,
-    DetectedSymlink,
-    DetectedSpecialFile,
-    DifferentFileOrFolderIsAlreadyPresent,
-    ParentFolderDoesNotExist,
-    FilesystemErrorDuringOperation,
-    NameTooLongForFilesystem,
-    CannotFingerprintFile,
-    DestinationPathInUnresolvedArea,
-    MACVerificationFailure,
-    UnknownDownloadIssue,
-    DeletedOrMovedByUser,
-    FileFolderDeletedByUser,
-    MoveToDebrisFolderFailed,
-    IgnoreFileMalformed,
-    FilesystemErrorListingFolder,
-    FilesystemErrorIdentifyingFolderContent,  // Deprecated after SDK-3206
-    WaitingForScanningToComplete,
-    WaitingForAnotherMoveToComplete,
-    SourceWasMovedElsewhere,
-    FilesystemCannotStoreThisName,
-    CloudNodeInvalidFingerprint,
-    CloudNodeIsBlocked,
+    FileChangingFrequently = 1,
+    IgnoreRulesUnknown = 2,
+    DetectedHardLink = 3,
+    DetectedSymlink = 4,
+    DetectedSpecialFile = 5,
+    DifferentFileOrFolderIsAlreadyPresent = 6,
+    ParentFolderDoesNotExist = 7,
+    FilesystemErrorDuringOperation = 8,
+    NameTooLongForFilesystem = 9,
+    CannotFingerprintFile = 10,
+    DestinationPathInUnresolvedArea = 11,
+    MACVerificationFailure = 12,
+    UnknownDownloadIssue = 13,
+    DeletedOrMovedByUser = 14,
+    FileFolderDeletedByUser = 15,
+    MoveToDebrisFolderFailed = 16,
+    IgnoreFileMalformed = 17,
+    FilesystemErrorListingFolder = 18,
+    // FilesystemErrorIdentifyingFolderContent = 19, -> obsolete
+    WaitingForScanningToComplete = 20,
+    WaitingForAnotherMoveToComplete = 21,
+    SourceWasMovedElsewhere = 22,
+    FilesystemCannotStoreThisName = 23,
+    CloudNodeInvalidFingerprint = 24,
+    CloudNodeIsBlocked = 25,
 
-    PutnodeDeferredByController,
-    PutnodeCompletionDeferredByController,
-    PutnodeCompletionPending,
-    UploadDeferredByController,
+    PutnodeDeferredByController = 26,
+    PutnodeCompletionDeferredByController = 27,
+    PutnodeCompletionPending = 28,
+    UploadDeferredByController = 29,
 
-    DetectedNestedMount,
+    DetectedNestedMount = 30,
 
     PathProblem_LastPlusOne
 };
@@ -1506,5 +1561,98 @@ using detail::CheckableMutex;
 #define IOS_OR_POSIX(i, p) p
 
 #endif // ! USE_IOS
+
+/**
+ * @brief A simple LRU cache implementation.
+ *
+ * @tparam Key
+ * @tparam Value
+ */
+template<typename Key, typename Value>
+class LRUCache
+{
+public:
+    LRUCache(std::size_t capacity):
+        mCapacity(capacity)
+    {}
+
+    /**
+     * @brief Inserts or updates a value associated with the given key.
+     *
+     * - If the key already exists, its position is moved to the front of the list (most recently
+     * used).
+     * - If the key does not exist and the cache is at full capacity, the least recently used
+     * element (at the back) is removed.
+     *
+     * @param key   The key to insert or update.
+     * @param value The value to associate with the key.
+     */
+    void put(const Key& key, const Value& value)
+    {
+        if (auto it = mMap.find(key); it != mMap.end())
+        {
+            // Update value
+            it->second->second = value;
+            mList.splice(mList.begin(), mList, it->second);
+            return;
+        }
+
+        // Remove las element
+        if (mList.size() == mCapacity)
+        {
+            if (mCapacity == 0)
+                return;
+
+            auto last = mList.end();
+            --last; // point to the last element
+            mMap.erase(last->first);
+            mList.pop_back();
+        }
+
+        mList.emplace_front(key, value);
+        mMap[key] = mList.begin();
+    }
+
+    /**
+     * @brief Retrieves the value associated with the given key, if it exists.
+     *
+     * - If the key is found, move the corresponding element to the front (most recently used).
+     * - If the key is not found, return std::nullopt.
+     *
+     * @param key The key to search for in the cache.
+     * @return std::optional<Value> The value if found, or std::nullopt if not.
+     */
+    std::optional<Value> get(const Key& key)
+    {
+        const auto it = mMap.find(key);
+        if (it == mMap.end())
+        {
+            return std::nullopt;
+        }
+
+        mList.splice(mList.begin(), mList, it->second);
+
+        return it->second->second;
+    }
+
+    /**
+     * @brief Returns the current number of elements in the cache.
+     */
+    std::size_t size() const
+    {
+        return mList.size();
+    }
+
+private:
+    // The front of the list is the most recently used element.
+    // The back of the list is the least recently used element.
+    std::list<std::pair<Key, Value>> mList;
+
+    // An unordered_map that maps a Key to an iterator pointing
+    // to the element in the list. This allows O(1) average-time lookups.
+    std::unordered_map<Key, typename std::list<std::pair<Key, Value>>::iterator> mMap;
+
+    std::size_t mCapacity{1};
+};
 
 #endif

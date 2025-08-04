@@ -3,6 +3,7 @@
 #include <future>
 #include <mutex>
 
+#include <mega/common/task_executor_flags_forward.h>
 #include <mega/fuse/common/inode_forward.h>
 #include <mega/fuse/common/inode_id_forward.h>
 #include <mega/fuse/common/inode_info_forward.h>
@@ -11,8 +12,6 @@
 #include <mega/fuse/common/mount_forward.h>
 #include <mega/fuse/common/mount_info.h>
 #include <mega/fuse/common/mount_inode_id_forward.h>
-#include <mega/fuse/common/normalized_path.h>
-#include <mega/fuse/common/task_executor_flags_forward.h>
 #include <mega/fuse/platform/context_forward.h>
 #include <mega/fuse/platform/mount_db_forward.h>
 
@@ -50,9 +49,6 @@ class Mount
     // What cloud node are we mapping to?
     const NodeHandle mHandle;
 
-    // What local path are we mapping from?
-    const NormalizedPath mPath;
-
     // Used to keep (pin) inodes in memory.
     FromInodeIDMap<PinnedInodeInfo> mPins;
 
@@ -71,7 +67,7 @@ protected:
     void pin(InodeRef inode, const InodeInfo& info);
 
     // Unpin a pinned inode.
-    void unpin(InodeRef inode, std::size_t num);
+    void unpin(InodeRef inode, std::uint64_t num);
 
 public:
     // Add a context to our context set.
@@ -89,7 +85,7 @@ public:
     void enabled();
 
     // Update this mount's executor flags.
-    virtual void executorFlags(const TaskExecutorFlags& flags);
+    virtual void executorFlags(const common::TaskExecutorFlags& flags);
 
     // Update this mount's flags.
     void flags(const MountFlags& flags);
@@ -137,7 +133,7 @@ public:
     std::string name() const;
 
     // What local path is this mount mapping from?
-    const NormalizedPath& path() const;
+    virtual common::NormalizedPath path() const = 0;
 
     // Is this mount writable?
     bool writable() const;

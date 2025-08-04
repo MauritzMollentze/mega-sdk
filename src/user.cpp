@@ -24,6 +24,7 @@
 #include "mega/base64.h"
 #include "mega/logging.h"
 #include "mega/megaclient.h"
+#include "mega/tlv.h"
 #include "mega/user_attribute_manager.h"
 
 namespace mega {
@@ -50,19 +51,18 @@ User::User(const char* cemail):
 // definition.
 User::~User() = default;
 
-bool User::mergeUserAttribute(attr_t type, const string_map &newValuesMap, TLVstore &tlv)
+bool User::mergeUserAttribute(attr_t type, const string_map& newValuesMap, string_map& destination)
 {
     bool modified = false;
 
     for (const auto &it : newValuesMap)
     {
-        const char *key = it.first.c_str();
-        string newValue = it.second;
+        const string& key = it.first;
+        const string& newValue = it.second;
         string currentValue;
-        string buffer;
-        if (tlv.get(key, buffer) && !buffer.empty())  // the key may not exist in the current user attribute
+        if (auto itD = destination.find(key); itD != destination.end() && !itD->second.empty())
         {
-            Base64::btoa(buffer, currentValue);
+            Base64::btoa(itD->second, currentValue);
         }
         if (newValue != currentValue)
         {
@@ -72,11 +72,11 @@ bool User::mergeUserAttribute(attr_t type, const string_map &newValuesMap, TLVst
                  || type == ATTR_APPS_PREFS) && newValue[0] == '\0')
             {
                 // alias/deviceName/appPrefs being removed
-                tlv.reset(key);
+                destination.erase(key);
             }
             else
             {
-                tlv.set(key, Base64::atob(newValue));
+                destination[key] = Base64::atob(newValue);
             }
             modified = true;
         }
@@ -153,7 +153,7 @@ User* User::unserialize(MegaClient* client, string* d)
     v = MemAccess::get<visibility_t>(ptr);
     ptr += sizeof v;
 
-    l = *ptr++;
+    l = static_cast<unsigned char>(*ptr++);
     if (l)
     {
         if (ptr + l > end)
@@ -195,7 +195,13 @@ User* User::unserialize(MegaClient* client, string* d)
         }
     }
 
-    if ((i >= 0) || !(u = client->finduser(uh, 1)))
+    if (i >= 0)
+    {
+        return NULL;
+    }
+
+    u = client->finduser(uh, 1);
+    if (!u)
     {
         return NULL;
     }
@@ -216,11 +222,11 @@ User* User::unserialize(MegaClient* client, string* d)
     {
         string prEd255, prCu255;
 
-        const string* keys = u->getattr(ATTR_KEYS);
-        if (keys)
+        const UserAttribute* keysAttribute = u->getAttribute(ATTR_KEYS);
+        if (keysAttribute && !keysAttribute->isNotExisting())
         {
             client->mKeyManager.setKey(client->key);
-            if (client->mKeyManager.fromKeysContainer(*keys))
+            if (client->mKeyManager.fromKeysContainer(keysAttribute->value()))
             {
                 prEd255 = client->mKeyManager.privEd25519();
                 prCu255 = client->mKeyManager.privCu25519();
@@ -229,14 +235,15 @@ User* User::unserialize(MegaClient* client, string* d)
 
         if (!client->mKeyManager.generation())
         {
-            const string *av = (u->isattrvalid(ATTR_KEYRING)) ? u->getattr(ATTR_KEYRING) : NULL;
-            if (av)
+            const UserAttribute* attribute = u->getAttribute(ATTR_KEYRING);
+            if (attribute && attribute->isValid())
             {
-                unique_ptr<TLVstore> tlvRecords(TLVstore::containerToTLVrecords(av, &client->key));
-                if (tlvRecords)
+                unique_ptr<string_map> records{
+                    tlv::containerToRecords(attribute->value(), client->key)};
+                if (records)
                 {
-                    tlvRecords->get(EdDSA::TLV_KEY, prEd255);
-                    tlvRecords->get(ECDH::TLV_KEY, prCu255);
+                    prEd255.swap((*records)[EdDSA::TLV_KEY]);
+                    prCu255.swap((*records)[ECDH::TLV_KEY]);
                 }
                 else
                 {
@@ -303,68 +310,55 @@ void User::removepkrs(MegaClient* client)
     }
 }
 
-void User::setattr(attr_t at, string *av, string *v)
+void User::setAttribute(attr_t at, const string& value, const string& version)
 {
     setChanged(at);
-
-    const string& attrValue = av ? *av : string{};
-    const string& attrVersion = v ? *v : string{};
-    mAttributeManager->set(at, attrValue, attrVersion);
+    mAttributeManager->set(at, value, version);
 }
 
-void User::invalidateattr(attr_t at)
+bool User::updateAttributeIfDifferentVersion(attr_t at, const string& value, const string& version)
 {
-    setChanged(at);
-    mAttributeManager->setExpired(at);
+    if (mAttributeManager->setIfNewVersion(at, value, version))
+    {
+        setChanged(at);
+        return true;
+    }
+
+    return false;
 }
 
-void User::removeattr(attr_t at, bool ownUser)
+void User::setAttributeExpired(attr_t at)
 {
-    if (isattrvalid(at))
+    if (mAttributeManager->setExpired(at))
     {
         setChanged(at);
     }
-
-    if (ownUser)
-        mAttributeManager->setNotExisting(at); // avoids fetch from servers
-    else
-        mAttributeManager->erase(at);
 }
 
-void User::removeattr(attr_t at, const string& version)
+const UserAttribute* User::getAttribute(attr_t at) const
 {
-    if (isattrvalid(at))
-    {
-        invalidateattr(at);
-    }
+    return mAttributeManager->get(at);
 }
 
-// updates the user attribute value+version only if different
-int User::updateattr(attr_t at, std::string *av, std::string *v)
+void User::removeAttribute(attr_t at)
 {
-    if (mAttributeManager->setIfNewVersion(at, *av, *v))
+    if (mAttributeManager->erase(at))
     {
         setChanged(at);
-        return 1;
     }
-
-    return 0;
 }
 
-bool User::nonExistingAttribute(attr_t at) const
+void User::removeAttributeUpdateVersion(attr_t at, const string& version)
 {
-    return mAttributeManager->isNotExisting(at);
+    if (mAttributeManager->eraseUpdateVersion(at, version))
+    {
+        setChanged(at);
+    }
 }
 
-// returns the value if there is value (even if it's invalid by now)
-const string * User::getattr(attr_t at)
+void User::cacheNonExistingAttributes()
 {
-    return mAttributeManager->getRawValue(at);
-}
-
-bool User::isattrvalid(attr_t at)
-{
-    return mAttributeManager->isValid(at);
+    mAttributeManager->cacheNonExistingAttributes();
 }
 
 string User::attr2string(attr_t type)
@@ -671,11 +665,6 @@ m_time_t User::getPwdReminderData(int numDetail, const char *data, unsigned int 
     return 0;
 }
 
-const string *User::getattrversion(attr_t at)
-{
-    return mAttributeManager->getVersion(at);
-}
-
 bool User::setChanged(attr_t at)
 {
     switch(at)
@@ -846,11 +835,11 @@ bool User::setChanged(attr_t at)
     return true;
 }
 
-void User::setTag(int tag)
+void User::setTag(int newTag)
 {
-    if (this->tag != 0)    // external changes prevail
+    if (tag != 0) // external changes prevail
     {
-        this->tag = tag;
+        tag = newTag;
     }
 }
 
@@ -881,14 +870,12 @@ string User::attributePrefixInTLV(attr_t type, bool modifier)
     return string();
 }
 
-AuthRing::AuthRing(attr_t type, const TLVstore &authring)
-    : mType(type)
+AuthRing::AuthRing(attr_t type, const string_map& authring):
+    mType(type)
 {
-    string authType = "";
-    string authValue;
-    if (authring.get(authType, authValue))
+    if (auto it = authring.find(""); it != authring.end())
     {
-        if (!deserialize(authValue))
+        if (!deserialize(it->second))
         {
             LOG_warn << "Excess data while deserializing Authring (TLV) of type: " << type;
         }
@@ -937,11 +924,10 @@ bool AuthRing::deserialize(const string& authValue)
 std::string* AuthRing::serialize(PrnGen &rng, SymmCipher &key) const
 {
     string buf = serializeForJS();
-
-    TLVstore tlv;
-    tlv.set("", buf);
-
-    return tlv.tlvRecordsToContainer(rng, &key);
+    string_map records{
+        {{}, std::move(buf)}
+    };
+    return tlv::recordsToContainer(std::move(records), rng, key).release();
 }
 
 string AuthRing::serializeForJS() const

@@ -35,7 +35,7 @@ public:
     void onUserAlertsUpdate(MegaApi* api, MegaUserAlertList *alerts) override;
     void onNodesUpdate(MegaApi* api, MegaNodeList *nodes) override;
     void onAccountUpdate(MegaApi* api) override;
-	void onReloadNeeded(MegaApi* api) override;
+    void onReloadNeeded(MegaApi* api);
     void onEvent(MegaApi* api, MegaEvent *e) override;
 
 #ifdef ENABLE_SYNC
@@ -45,6 +45,7 @@ public:
     void onSyncAdded(MegaApi *api,  MegaSync *sync) override;
     void onSyncDeleted(MegaApi *api,  MegaSync *sync) override;
     void onGlobalSyncStateChanged(MegaApi* api) override;
+    void onSyncRemoteRootChanged(MegaApi* api, MegaSync* sync) override;
 #endif
 
     void onMountAdded(MegaApi* api, const char* path, int result) override;

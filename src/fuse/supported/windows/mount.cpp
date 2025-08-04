@@ -1,25 +1,27 @@
 #include <cstring>
 
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/client.h>
 #include <mega/fuse/common/directory_inode.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/file_inode.h>
 #include <mega/fuse/common/file_open_flag.h>
+#include <mega/fuse/common/inode.h>
 #include <mega/fuse/common/inode_id.h>
 #include <mega/fuse/common/inode_info.h>
-#include <mega/fuse/common/inode.h>
 #include <mega/fuse/common/logging.h>
+#include <mega/fuse/common/mount_event.h>
+#include <mega/fuse/common/mount_event_type.h>
 #include <mega/fuse/common/mount_inode_id.h>
 #include <mega/fuse/common/mount_result.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/ref.h>
 #include <mega/fuse/platform/context.h>
 #include <mega/fuse/platform/date_time.h>
 #include <mega/fuse/platform/directory_context.h>
 #include <mega/fuse/platform/file_context.h>
 #include <mega/fuse/platform/library.h>
-#include <mega/fuse/platform/mount_db.h>
 #include <mega/fuse/platform/mount.h>
+#include <mega/fuse/platform/mount_db.h>
 #include <mega/fuse/platform/path_adapter.h>
 #include <mega/fuse/platform/service_context.h>
 #include <mega/fuse/platform/utility.h>
@@ -32,6 +34,8 @@ namespace fuse
 {
 namespace platform
 {
+
+using namespace common;
 
 NTSTATUS Mount::canDelete(PVOID context)
 {
@@ -154,7 +158,7 @@ NTSTATUS Mount::create(const std::wstring& path,
     // Couldn't create the new node.
     if (!created)
         return translate(created.error());
-    
+
     // Latch the new node's description.
     translate(info, *this, std::get<1>(*created));
 
@@ -473,11 +477,7 @@ NTSTATUS Mount::overwrite(PVOID context,
     return STATUS_SUCCESS;
 }
 
-NTSTATUS Mount::read(PVOID context,
-                     PVOID buffer,
-                     UINT64 offset,
-                     ULONG length,
-                     ULONG& numRead)
+NTSTATUS Mount::read(PVOID context, PVOID buffer, UINT64 offset, ULONG length, ULONG& /*numRead*/)
 {
     // Sanity.
     assert(context);
@@ -492,7 +492,8 @@ NTSTATUS Mount::read(PVOID context,
     auto hint = mDispatcher.request().Hint;
 
     // Actually reads the file.
-    auto read = [=](Activity&, const Task& task) {
+    auto read = [=](Activity&, const Task&)
+    {
         auto response = std::make_unique<FSP_FSCTL_TRANSACT_RSP>();
 
         std::memset(response.get(), 0, sizeof(response));
@@ -510,8 +511,7 @@ NTSTATUS Mount::read(PVOID context,
             return mDispatcher.reply(*response, result.error());
 
         // Let the caller know how much data was read.
-        response->IoStatus.Information =
-          static_cast<ULONG>(result->size());
+        response->IoStatus.Information = static_cast<ULONG>(result->size());
 
         // Caller's hit the end of the file.
         if (!response->IoStatus.Information)
@@ -535,11 +535,11 @@ NTSTATUS Mount::read(PVOID context,
 }
 
 NTSTATUS Mount::readDirectory(PVOID context,
-                              const std::string& pattern,
+                              const std::string& /*pattern*/,
                               const std::string& marker,
                               PVOID buffer,
                               ULONG length,
-                              ULONG& numWritten)
+                              ULONG& /*numWritten*/)
 {
     // Get our hands on the directory's context.
     auto* context_ = reinterpret_cast<DirectoryContext*>(context);
@@ -633,9 +633,9 @@ NTSTATUS Mount::rename(PVOID context,
 NTSTATUS Mount::setBasicInfo(PVOID context,
                              UINT32 attributes,
                              UINT64 created,
-                             UINT64 accessed,
+                             UINT64 /*accessed*/,
                              UINT64 written,
-                             UINT64 changed,
+                             UINT64 /*changed*/,
                              FSP_FSCTL_FILE_INFO& info)
 {
     // Get our hands on this inode's context.
@@ -764,9 +764,7 @@ NTSTATUS Mount::setSecurity(PVOID context,
     return STATUS_SUCCESS;
 }
 
-void Mount::stopped(BOOLEAN normally)
-{
-}
+void Mount::stopped(BOOLEAN /*normally*/) {}
 
 NTSTATUS Mount::write(PVOID context,
                       PVOID buffer,
@@ -774,8 +772,8 @@ NTSTATUS Mount::write(PVOID context,
                       ULONG length,
                       BOOLEAN append,
                       BOOLEAN noGrow,
-                      ULONG& numWritten,
-                      FSP_FSCTL_FILE_INFO& info)
+                      ULONG& /*numWritten*/,
+                      FSP_FSCTL_FILE_INFO& /*info*/)
 {
     // Sanity.
     assert(context);
@@ -836,10 +834,13 @@ Mount::Mount(const MountInfo& info,
              MountDB& mountDB)
   : fuse::Mount(info, mountDB)
   , mActivities()
-  , mDispatcher(*this)
-  , mExecutor(mountDB.executorFlags())
+  , mDispatcher(*this, info.mPath)
+  , mExecutor(mountDB.executorFlags(), logger())
 {
-    mDispatcher.start();
+    mDispatcher.start(info.mPath);
+
+    // Let observers know the mount's functional.
+    enabled();
 
     FUSEDebugF("Mount constructed: %s",
                path().toPath(false).c_str());
@@ -857,30 +858,15 @@ Mount::~Mount()
                path().toPath(false).c_str());
 }
 
-void Mount::invalidateAttributes(InodeID id)
-{
-}
+void Mount::invalidateAttributes(InodeID) {}
 
-void Mount::invalidateData(InodeID id,
-                           m_off_t offset,
-                           m_off_t size)
-{
-}
+void Mount::invalidateData(InodeID, m_off_t /*offset*/, m_off_t /*size*/) {}
 
-void Mount::invalidateData(InodeID id)
-{
-}
+void Mount::invalidateData(InodeID) {}
 
-void Mount::invalidateEntry(const std::string& name,
-                            InodeID child,
-                            InodeID parent)
-{
-}
+void Mount::invalidateEntry(const std::string& /*name*/, InodeID /*child*/, InodeID /*parent*/) {}
 
-void Mount::invalidateEntry(const std::string& name,
-                            InodeID parent)
-{
-}
+void Mount::invalidateEntry(const std::string& /*name*/, InodeID /*parent*/) {}
 
 InodeID Mount::map(MountInodeID id) const
 {
@@ -890,6 +876,11 @@ InodeID Mount::map(MountInodeID id) const
 MountInodeID Mount::map(InodeID id) const
 {
     return MountInodeID(id);
+}
+
+NormalizedPath Mount::path() const
+{
+    return mDispatcher.path();
 }
 
 MountResult Mount::remove()

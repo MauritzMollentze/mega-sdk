@@ -85,13 +85,13 @@ const char* GfxProviderIsolatedProcess::Formats::videoformats() const
     return (mIsValid && !mVideoformats.empty()) ? mVideoformats.c_str() : nullptr;
 }
 
-std::unique_ptr<GfxProviderIsolatedProcess> GfxProviderIsolatedProcess::create(
-    const std::string &endpointName,
-    const std::string &executable)
+std::unique_ptr<GfxProviderIsolatedProcess>
+    GfxProviderIsolatedProcess::create(const GfxIsolatedProcess::Params& params)
 {
-    if (endpointName.empty() || executable.empty()) return nullptr;
+    if (!params.isValid())
+        return nullptr;
 
-    auto process = std::make_unique<GfxIsolatedProcess>(endpointName, executable);
+    auto process = std::make_unique<GfxIsolatedProcess>(params);
     return std::make_unique<GfxProviderIsolatedProcess>(std::move(process));
 }
 
@@ -161,17 +161,6 @@ AutoStartLauncher::AutoStartLauncher(const std::vector<std::string>& argv, std::
     mShutdowner(std::move(shutdowner))
 {
     assert(!mArgv.empty());
-
-    // preventive check: at least one element (executable)
-    if (!mArgv.empty())
-    {
-        // launch loop thread
-        startLaunchLoopThread();
-    }
-    else
-    {
-        LOG_fatal << "AutoStartLauncher argv is empty";
-    }
 }
 
 bool AutoStartLauncher::startUntilSuccess(Process& process)
@@ -201,10 +190,13 @@ bool AutoStartLauncher::startUntilSuccess(Process& process)
     return false;
 }
 
-bool AutoStartLauncher::startLaunchLoopThread()
+bool AutoStartLauncher::start()
 {
-    static const milliseconds maxBackoff(400);
+    static const milliseconds maxBackoff(3000);
     static const milliseconds fastFailureThreshold(1000);
+
+    if (mArgv.empty())
+        return false;
 
     // There are permanent startup failure such as missing DLL. This is not likey to happen
     // at customer's side as it will be installed properly. It is more likely during development
@@ -222,7 +214,8 @@ bool AutoStartLauncher::startLaunchLoopThread()
                 // if less than threshhold, it fails right after startup.
                 if ((used < fastFailureThreshold) && !mShuttingDown)
                 {
-                    LOG_err << "process existed too fast: " << used.count() << " backoff" << backOff.count() << "ms";
+                    // LOG_verbose << "process existed too fast: " << used.count() << " backoff "
+                    //           << backOff.count() << "ms";
                     mSleeper.sleep(backOff);
                     backOff = std::min(backOff * 2, maxBackoff); // double it and maxBackoff at most
                 }
@@ -233,7 +226,11 @@ bool AutoStartLauncher::startLaunchLoopThread()
         }
     };
 
-    auto launcher = [this, backoffForFastFailure]() {
+    auto launcher = [this, backoffForFastFailure]()
+    {
+        // Keep a copy, so the object is always live while the code is running
+        auto keepRef = shared_from_this();
+
         mThreadIsRunning = true;
 
         backoffForFastFailure([this](){
@@ -241,11 +238,13 @@ bool AutoStartLauncher::startLaunchLoopThread()
             if (startUntilSuccess(process))
             {
                 bool ret = process.wait();
-                LOG_debug << "wait: " << ret
-                          << " hasSignal: " << process.hasTerminateBySignal()
-                          << " " << (process.hasTerminateBySignal() ? std::to_string(process.getTerminatingSignal()) : "")
-                          << " hasExited: " << process.hasExited()
-                          << " " << (process.hasExited() ? std::to_string(process.getExitCode()) : "");
+                LOG_verbose << "wait: " << ret << " hasSignal: " << process.hasTerminateBySignal()
+                            << " "
+                            << (process.hasTerminateBySignal() ?
+                                    std::to_string(process.getTerminatingSignal()) :
+                                    "")
+                            << " hasExited: " << process.hasExited() << " "
+                            << (process.hasExited() ? std::to_string(process.getExitCode()) : "");
             }
         });
 
@@ -262,19 +261,33 @@ bool AutoStartLauncher::startLaunchLoopThread()
 // is just starting. so we'll retry in the loop, but there is no reason it
 // couldn't be shut down in 15 seconds
 //
-void AutoStartLauncher::exitLaunchLoopThread()
+// @return true if thread exits, otherwise false
+bool AutoStartLauncher::exitLaunchLoopThread()
 {
-    milliseconds backOff(10);
-    while (mThreadIsRunning && backOff < 15s)
+    milliseconds interval{10};
+    milliseconds totalWaitTime{0};
+    while (mThreadIsRunning && totalWaitTime < 15s)
     {
+        LOG_verbose << "interval " << interval.count() << " totalWaitTime "
+                    << totalWaitTime.count();
+
         // shutdown the started process
         if (mShutdowner) mShutdowner();
-        std::this_thread::sleep_for(backOff);
-        backOff += 10ms;
+
+        // wait
+        std::this_thread::sleep_for(interval);
+
+        // Update total wait time
+        totalWaitTime += interval;
+
+        // backoff
+        interval += 10ms;
     }
+
+    return !mThreadIsRunning;
 }
 
-void AutoStartLauncher::shutDownOnce()
+void AutoStartLauncher::stop()
 {
     bool wasShuttingdown = mShuttingDown.exchange(true);
     if (wasShuttingdown)
@@ -287,15 +300,21 @@ void AutoStartLauncher::shutDownOnce()
     // cancel sleeper, thread in sleep is woken up if it is
     mSleeper.cancel();
 
-    exitLaunchLoopThread();
-    if (mThread.joinable()) mThread.join();
+    if (exitLaunchLoopThread())
+    {
+        if (mThread.joinable())
+            mThread.join();
+    }
+    else
+    {
+        // Defensive: the thread doesn't exit, detach the thread
+        // We had such bug and it is usually a bug
+        assert(false && "AutoStartLauncher detaching loop thread");
+        LOG_warn << "AutoStartLauncher detaching loop thread";
+        mThread.detach();
+    }
 
     LOG_info << "AutoStartLauncher is down";
-}
-
-AutoStartLauncher::~AutoStartLauncher()
-{
-    shutDownOnce();
 }
 
 bool CancellableSleeper::sleep(const milliseconds& period)
@@ -318,10 +337,12 @@ void CancellableSleeper::cancel()
 
 GfxIsolatedProcess::Params::Params(const std::string& endpointName,
                                    const std::string& executable,
-                                   std::chrono::seconds keepAliveInSeconds)
-    : endpointName(endpointName)
-    , executable(executable)
-    , keepAliveInSeconds(std::max(MIN_ALIVE_SECONDS, keepAliveInSeconds))
+                                   std::chrono::seconds keepAliveInSeconds,
+                                   const std::vector<std::string>& rawArguments):
+    endpointName(endpointName),
+    executable(executable),
+    keepAliveInSeconds(std::max(MIN_ALIVE_SECONDS, keepAliveInSeconds)),
+    rawArguments(rawArguments)
 {
 }
 
@@ -329,28 +350,36 @@ std::vector<std::string> GfxIsolatedProcess::Params::toArgs() const
 {
     LocalPath absolutePath = LocalPath::fromAbsolutePath(executable);
 
-     // Triple the keepAliveInSeconds as isolated process args.
-     // Allow at least 2 beats
-    std::vector<std::string> commandArgs = {
-        absolutePath.toPath(false),
-        "-n=" + endpointName,
-        "-l=" + std::to_string(keepAliveInSeconds.count() * 3)
-    };
+    std::vector<std::string> commandArgs = {absolutePath.toPath(false),
+                                            "-n=" + endpointName,
+                                            "-l=" + std::to_string(keepAliveInSeconds.count())};
+
+    // Append raw arguments
+    // For simplicity, duplication isn't checked, leave to the executable to deal with
+    std::copy(rawArguments.begin(), rawArguments.end(), std::back_inserter(commandArgs));
 
     return commandArgs;
 }
 
-GfxIsolatedProcess::GfxIsolatedProcess(const Params& params)
-    : mEndpointName(params.endpointName)
-    , mLauncher(params.toArgs(), [endpointName = params.endpointName]() { shutdown(endpointName); })
-    , mBeater(seconds(params.keepAliveInSeconds), params.endpointName)
+// We divide keepAliveInSeconds by three to set up mBeater so that it allows at least two
+// beats within the keep-alive period.
+GfxIsolatedProcess::GfxIsolatedProcess(const Params& params):
+    mEndpointName{
+        params.endpointName
+},
+    mLauncher{new AutoStartLauncher{params.toArgs(),
+                                    [endpointName = params.endpointName]()
+                                    {
+                                        shutdown(endpointName);
+                                    }}},
+    mBeater{seconds(params.keepAliveInSeconds / 3), params.endpointName}
 {
+    mLauncher->start();
 }
 
-GfxIsolatedProcess::GfxIsolatedProcess(const std::string& endpointName,
-                                       const std::string& executable)
-    : GfxIsolatedProcess(Params{endpointName, executable})
+GfxIsolatedProcess::~GfxIsolatedProcess()
 {
+    mLauncher->stop();
 }
 
-}
+} // Namespace

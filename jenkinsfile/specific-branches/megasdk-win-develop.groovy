@@ -11,6 +11,14 @@ pipeline {
             environment{
                 VCPKGPATH  = "${WORKSPACE}\\..\\..\\vcpkg"
                 BUILD_DIR = "build_dir"
+             /*
+              * VCPKG cache in S4 commented out because it takes too long time.
+              * See CID-839 
+              * VCPKG_BINARY_SOURCES  = 'clear;x-aws,s3://vcpkg-cache/archives/,readwrite'
+              * AWS_ACCESS_KEY_ID     = credentials('s4_access_key_id_vcpkg_cache')
+              * AWS_SECRET_ACCESS_KEY = credentials('s4_secret_access_key_vcpkg_cache')
+              * AWS_ENDPOINT_URL      = "https://s3.g.s4.mega.io"
+              */
             }
             options{
                 timeout(time: 150, unit: 'MINUTES')
@@ -24,7 +32,7 @@ pipeline {
 
                 sh "echo Building SDK x86"
                 sh "rm -rf build_dir_x86; mkdir build_dir_x86"
-                sh "cmake -DENABLE_SDKLIB_WERROR=OFF -DENABLE_CHAT=ON -DVCPKG_ROOT='${VCPKGPATH}' -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_GENERATOR_PLATFORM=Win32 -S '${WORKSPACE}' -B '${WORKSPACE}'\\\\build_dir_x86\\\\"
+                sh "cmake -DENABLE_CHAT=ON -DVCPKG_ROOT='${VCPKGPATH}' -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_GENERATOR_PLATFORM=Win32 -S '${WORKSPACE}' -B '${WORKSPACE}'\\\\build_dir_x86\\\\"
                 sh "cmake --build '${WORKSPACE}'\\\\build_dir_x86\\\\ --config ${BUILD_TYPE} -j 1"
             }
         }

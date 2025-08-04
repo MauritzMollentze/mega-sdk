@@ -113,6 +113,10 @@ struct MEGA_API AccountDetails
 {
     vector<AccountSubscription> subscriptions;
 
+    // Expiration time of the latest PRO plan.
+    // This expiration time could be higher than the currently active PRO plan
+    m_time_t pro_until = 0;
+
     // quota related to the session account
     m_off_t storage_used = 0;
     m_off_t storage_max = 0;
@@ -216,6 +220,26 @@ struct MEGA_API CurrencyData
 
     std::string localCurrencySymbol;    // ie. $, encoded in B64url
     std::string localCurrencyName;      // ie. NZD
+};
+
+struct MEGA_API Product
+{
+    unsigned int planType = ~(unsigned)0;
+    handle productHandle = UNDEF;
+    unsigned int proLevel = 0;
+    int gbStorage = -1;
+    int gbTransfer = -1;
+    unsigned int months = 0;
+    unsigned int amount = 0;
+    unsigned int amountMonth = 0;
+    unsigned int localPrice = 0;
+    std::string description;
+    std::map<std::string, uint32_t> features;
+    std::string iosid;
+    std::string androidid;
+    unsigned int testCategory = 0;
+    std::shared_ptr<BusinessPlan> businessPlan;
+    unsigned int trialDays = 0;
 };
 
 } // namespace

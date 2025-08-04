@@ -18,8 +18,7 @@ args = parser.parse_args()
 # Check for required environment variables
 required_env_vars = [
     "GITLAB_TOKEN",
-    "JIRA_USERNAME",
-    "JIRA_PASSWORD",
+    "JIRA_TOKEN",
     "SLACK_TOKEN",
     "GPG_KEYGRIP",
     "GPG_PASSWORD",
@@ -42,18 +41,17 @@ release = ReleaseProcess(
 )
 
 # prerequisites for making a release
-release.setup_project_management(
-    args["jira_url"],
-    os.environ["JIRA_USERNAME"],
-    os.environ["JIRA_PASSWORD"],
-)
+release.setup_project_management(args["jira_url"], os.environ["JIRA_TOKEN"])
 release.set_release_version_to_make(args["release_version"])
 
 slack_token = os.environ.get("SLACK_TOKEN", "")
 slack_channel_dev = args.get("slack_channel_dev_requests", "")
 slack_channel_announce = args.get("slack_channel_announce", "")
 if slack_token and (slack_channel_dev or slack_channel_announce):
-    release.setup_chat(slack_token, slack_channel_dev, slack_channel_announce)
+    slack_thread_announce = args.get("slack_thread_announce", "")
+    release.setup_chat(
+        slack_token, slack_channel_dev, slack_channel_announce, slack_thread_announce
+    )
 
 if LocalRepository.has_version_file():
     # STEP 3: update version in local file
@@ -78,14 +76,9 @@ release.open_mr_for_release_branch(args["public_branch"])
 
 
 # STEP 7: Rename previous NextRelease version; create new NextRelease version
-release.manage_versions(
-    args["jira_url"],
-    os.environ["JIRA_USERNAME"],
-    os.environ["JIRA_PASSWORD"],
-    args["target_apps"],
-)
+release.manage_versions(args["target_apps"])
 
 
 # STEP 8: Post release notes to Slack
 apps = [a.strip() for a in args["target_apps"].split("/")]
-release.post_notes(apps)
+release.post_notes(apps, releaseType="newRelease")

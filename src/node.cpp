@@ -34,8 +34,12 @@
 #include "mega/transfer.h"
 #include "mega/transferslot.h"
 #include "megafs.h"
+#ifdef __ANDROID__
+#include "mega/android/androidFileSystem.h"
+#endif
 
-namespace mega {
+namespace mega
+{
 
 const vector<string> Node::attributesToCopyIntoPreviousVersions{
     "fav",
@@ -142,22 +146,19 @@ int Node::getShareType() const
     return shareType;
 }
 
-bool Node::isAncestor(NodeHandle ancestorHandle) const
+bool Node::hasAncestorMatching(const nodeCondition_t& condition) const
 {
-    Node* ancestor = parent.get();
+    const Node* ancestor = parent.get();
     while (ancestor)
     {
-        if (ancestor->nodeHandle() == ancestorHandle)
-        {
+        if (condition(*ancestor))
             return true;
-        }
 
         ancestor = ancestor->parent.get();
     }
 
     return false;
 }
-
 
 bool Node::hasChildWithName(const string& name) const
 {
@@ -209,77 +210,77 @@ bool Node::getExtension(std::string& ext, const string& nodeName)
 
 const std::set<nameid>& documentExtensions()
 {
-    static const std::set<nameid> docs {MAKENAMEID3('a','b','w'), MAKENAMEID3('d','o','c'), MAKENAMEID4('d','o','c','m'),
-                                        MAKENAMEID4('d','o','c','x'), MAKENAMEID3('d','o','t'), MAKENAMEID4('d','o','t','m'),
-                                        MAKENAMEID4('d','o','t','x'), MAKENAMEID3('o','d','t'),
-                                        MAKENAMEID3('s','x','c'), MAKENAMEID3('s','x','d'), MAKENAMEID3('s','x','i'),
-                                        MAKENAMEID4('t','e','x','t'), MAKENAMEID3('t','s','v'), MAKENAMEID3('t','t','l'), MAKENAMEID3('t','x','t'),
-                                        MAKENAMEID3('o','r','g')};
+    static const std::set<nameid> docs {makeNameid("abw"), makeNameid("doc"), makeNameid("docm"),
+                                        makeNameid("docx"), makeNameid("dot"), makeNameid("dotm"),
+                                        makeNameid("dotx"), makeNameid("odt"),
+                                        makeNameid("sxc"), makeNameid("sxd"), makeNameid("sxi"),
+                                        makeNameid("text"), makeNameid("tsv"), makeNameid("ttl"), makeNameid("txt"),
+                                        makeNameid("org")};
     return docs;
 }
 
 const std::set<nameid>& spreadsheetExtensions()
 {
-    static const std::set<nameid> spds {MAKENAMEID3('c','s','v'), MAKENAMEID3('o','d','s'),
-                                        MAKENAMEID3('x','l','s'), MAKENAMEID4('x','l','s','m'), MAKENAMEID4('x','l','s','x')};
+    static const std::set<nameid> spds {makeNameid("csv"), makeNameid("ods"),
+                                        makeNameid("xls"), makeNameid("xlsm"), makeNameid("xlsx")};
     return spds;
 }
 
 const std::set<nameid>& pdfExtensions()
 {
-    static const std::set<nameid> pdfs {MAKENAMEID3('p','d','f')};
+    static const std::set<nameid> pdfs{makeNameid("pdf")};
     return pdfs;
 }
 
 const std::set<nameid>& presentationExtensions()
 {
-    static const std::set<nameid> pres {MAKENAMEID3('o','d','c'), MAKENAMEID3('o','d','p'), MAKENAMEID3('o','t','c'),
-                                        MAKENAMEID3('o','t','p'), MAKENAMEID3('p','o','t'), MAKENAMEID4('p','o','t','x'),
-                                        MAKENAMEID3('p','p','s'), MAKENAMEID4('p','p','s','x'), MAKENAMEID3('p','p','t'),
-                                        MAKENAMEID4('p','p','t','x'), MAKENAMEID4('s','l','d','x')};
+    static const std::set<nameid> pres {makeNameid("odc"), makeNameid("odp"), makeNameid("otc"),
+                                        makeNameid("otp"), makeNameid("pot"), makeNameid("potx"),
+                                        makeNameid("pps"), makeNameid("ppsx"), makeNameid("ppt"),
+                                        makeNameid("pptx"), makeNameid("sldx")};
     return pres;
 }
 
 const std::set<nameid>& archiveExtensions()
 {
-    static const std::set<nameid> acvs {MAKENAMEID2('7','z'), MAKENAMEID3('a','c','e'), MAKENAMEID3('b','z','2'),
-                                        MAKENAMEID2('g','z'), MAKENAMEID3('r','a','r'), MAKENAMEID3('t','a','r'),
-                                        MAKENAMEID3('z','i','p')};
+    static const std::set<nameid> acvs {makeNameid("7z"), makeNameid("ace"), makeNameid("bz2"),
+                                        makeNameid("gz"), makeNameid("rar"), makeNameid("tar"),
+                                        makeNameid("zip")};
     return acvs;
 }
 
 const std::set<nameid>& programExtensions()
 {
-    static const std::set<nameid> pgms {MAKENAMEID3('a','p','k'), MAKENAMEID3('b','a','t'), MAKENAMEID3('c','o','m'),
-                                        MAKENAMEID3('d','e','b'), MAKENAMEID3('e','x','e'), MAKENAMEID3('m','s','i'),
-                                        MAKENAMEID2('s','h')};
+    static const std::set<nameid> pgms {makeNameid("apk"), makeNameid("bat"), makeNameid("com"),
+                                        makeNameid("deb"), makeNameid("exe"), makeNameid("msi"),
+                                        makeNameid("sh")};
     return pgms;
 }
 
 const std::set<nameid>& miscExtensions()
 {
-    static const std::set<nameid> misc {MAKENAMEID3('c','s','v'), MAKENAMEID4('j','s','o','n'), MAKENAMEID3('l','o','g'),
-                                        MAKENAMEID3('o','t','f'), MAKENAMEID3('t','t','f')};
+    static const std::set<nameid> misc {makeNameid("csv"), makeNameid("json"), makeNameid("log"),
+                                        makeNameid("otf"), makeNameid("ttf")};
     return misc;
 }
 
 const std::set<nameid>& audioExtensions()
 {
-    static const std::set<nameid> auds {MAKENAMEID3('a','a','c'), MAKENAMEID3('a','d','p'), MAKENAMEID3('a','i','f'),
-                                        MAKENAMEID4('a','i','f','c'), MAKENAMEID4('a','i','f','f'), MAKENAMEID2('a','u'),
-                                        MAKENAMEID3('c','a','f'), MAKENAMEID3('d','r','a'), MAKENAMEID3('d','t','s'),
-                                        MAKENAMEID5('d','t','s','h','d'), MAKENAMEID3('e','o','l'), MAKENAMEID4('f','l','a','c'),
-                                        MAKENAMEID3('k','a','r'), MAKENAMEID3('l','v','p'), MAKENAMEID3('m','2','a'),
-                                        MAKENAMEID3('m','3','a'), MAKENAMEID3('m','3','u'), MAKENAMEID3('m','4','a'),
-                                        MAKENAMEID3('m','i','d'), MAKENAMEID4('m','i','d','i'), MAKENAMEID3('m','k','a'),
-                                        MAKENAMEID3('m','p','2'), MAKENAMEID4('m','p','2','a'), MAKENAMEID3('m','p','3'),
-                                        MAKENAMEID4('m','p','4','a'), MAKENAMEID4('m','p','g','a'), MAKENAMEID3('o','g','a'),
-                                        MAKENAMEID3('o','g','g'), MAKENAMEID3('p','y','a'), MAKENAMEID2('r','a'),
-                                        MAKENAMEID3('r','a','m'), MAKENAMEID3('r','i','p'), MAKENAMEID3('r','m','i'),
-                                        MAKENAMEID3('r','m','p'), MAKENAMEID3('s','3','m'), MAKENAMEID3('s','i','l'),
-                                        MAKENAMEID3('s','n','d'), MAKENAMEID3('s','p','x'), MAKENAMEID3('u','v','a'),
-                                        MAKENAMEID4('u','v','v','a'), MAKENAMEID3('w','a','v'), MAKENAMEID3('w','a','x'),
-                                        MAKENAMEID4('w','e','b','a'), MAKENAMEID3('w','m','a'), MAKENAMEID2('x','m')};
+    static const std::set<nameid> auds {makeNameid("aac"), makeNameid("adp"), makeNameid("aif"),
+                                        makeNameid("aifc"), makeNameid("aiff"), makeNameid("au"),
+                                        makeNameid("caf"), makeNameid("dra"), makeNameid("dts"),
+                                        makeNameid("dtshd"), makeNameid("eol"), makeNameid("flac"),
+                                        makeNameid("kar"), makeNameid("lvp"), makeNameid("m2a"),
+                                        makeNameid("m3a"), makeNameid("m3u"), makeNameid("m4a"),
+                                        makeNameid("mid"), makeNameid("midi"), makeNameid("mka"),
+                                        makeNameid("mp2"), makeNameid("mp2a"), makeNameid("mp3"),
+                                        makeNameid("mp4a"), makeNameid("mpga"), makeNameid("oga"),
+                                        makeNameid("ogg"), makeNameid("pya"), makeNameid("ra"),
+                                        makeNameid("ram"), makeNameid("rip"), makeNameid("rmi"),
+                                        makeNameid("rmp"), makeNameid("s3m"), makeNameid("sil"),
+                                        makeNameid("snd"), makeNameid("spx"), makeNameid("uva"),
+                                        makeNameid("uvva"), makeNameid("wav"), makeNameid("wax"),
+                                        makeNameid("weba"), makeNameid("wma"), makeNameid("xm")};
     return auds;
 }
 
@@ -292,81 +293,81 @@ const std::set<std::string>& longAudioExtension()
 
 const std::set<nameid>& videoExtensions()
 {
-    static const std::set<nameid> vids {MAKENAMEID3('3','g','2'), MAKENAMEID3('3','g','p'), MAKENAMEID3('a','s','f'),
-                                        MAKENAMEID3('a','s','x'), MAKENAMEID3('a','v','i'), MAKENAMEID3('d','v','b'),
-                                        MAKENAMEID3('f','4','v'), MAKENAMEID3('f','l','i'), MAKENAMEID3('f','l','v'),
-                                        MAKENAMEID3('f','v','t'), MAKENAMEID4('h','2','6','1'), MAKENAMEID4('h','2','6','3'),
-                                        MAKENAMEID4('h','2','6','4'), MAKENAMEID4('j','p','g','m'), MAKENAMEID4('j','p','g','v'),
-                                        MAKENAMEID3('j','p','m'), MAKENAMEID3('m','1','v'), MAKENAMEID3('m','2','v'),
-                                        MAKENAMEID3('m','4','u'), MAKENAMEID3('m','4','v'), MAKENAMEID3('m','j','2'),
-                                        MAKENAMEID4('m','j','p','2'), MAKENAMEID4('m','k','3','d'), MAKENAMEID3('m','k','s'),
-                                        MAKENAMEID3('m','k','v'), MAKENAMEID3('m','n','g'), MAKENAMEID3('m','o','v'),
-                                        MAKENAMEID5('m','o','v','i','e'), MAKENAMEID3('m','p','4'), MAKENAMEID4('m','p','4','v'),
-                                        MAKENAMEID3('m','p','e'), MAKENAMEID4('m','p','e','g'), MAKENAMEID3('m','p','g'),
-                                        MAKENAMEID4('m','p','g','4'), MAKENAMEID3('m','x','u'), MAKENAMEID3('o','g','v'),
-                                        MAKENAMEID3('p','y','v'), MAKENAMEID2('q','t'), MAKENAMEID3('s','m','v'),
-                                        MAKENAMEID3('u','v','h'), MAKENAMEID3('u','v','m'), MAKENAMEID3('u','v','p'),
-                                        MAKENAMEID3('u','v','s'), MAKENAMEID3('u','v','u'), MAKENAMEID3('u','v','v'),
-                                        MAKENAMEID4('u','v','v','h'), MAKENAMEID4('u','v','v','m'), MAKENAMEID4('u','v','v','p'),
-                                        MAKENAMEID4('u','v','v','s'), MAKENAMEID4('u','v','v','u'), MAKENAMEID4('u','v','v','v'),
-                                        MAKENAMEID3('v','i','v'), MAKENAMEID3('v','o','b'), MAKENAMEID4('w','e','b','m'),
-                                        MAKENAMEID2('w','m'), MAKENAMEID3('w','m','v'), MAKENAMEID3('w','m','x'),
-                                        MAKENAMEID3('w','v','x')};
+    static const std::set<nameid> vids {makeNameid("3g2"), makeNameid("3gp"), makeNameid("asf"),
+                                        makeNameid("asx"), makeNameid("avi"), makeNameid("dvb"),
+                                        makeNameid("f4v"), makeNameid("fli"), makeNameid("flv"),
+                                        makeNameid("fvt"), makeNameid("h261"), makeNameid("h263"),
+                                        makeNameid("h264"), makeNameid("jpgm"), makeNameid("jpgv"),
+                                        makeNameid("jpm"), makeNameid("m1v"), makeNameid("m2v"),
+                                        makeNameid("m4u"), makeNameid("m4v"), makeNameid("mj2"),
+                                        makeNameid("mjp2"), makeNameid("mk3d"), makeNameid("mks"),
+                                        makeNameid("mkv"), makeNameid("mng"), makeNameid("mov"),
+                                        makeNameid("movie"), makeNameid("mp4"), makeNameid("mp4v"),
+                                        makeNameid("mpe"), makeNameid("mpeg"), makeNameid("mpg"),
+                                        makeNameid("mpg4"), makeNameid("mxu"), makeNameid("ogv"),
+                                        makeNameid("pyv"), makeNameid("qt"), makeNameid("smv"),
+                                        makeNameid("uvh"), makeNameid("uvm"), makeNameid("uvp"),
+                                        makeNameid("uvs"), makeNameid("uvu"), makeNameid("uvv"),
+                                        makeNameid("uvvh"), makeNameid("uvvm"), makeNameid("uvvp"),
+                                        makeNameid("uvvs"), makeNameid("uvvu"), makeNameid("uvvv"),
+                                        makeNameid("viv"), makeNameid("vob"), makeNameid("webm"),
+                                        makeNameid("wm"), makeNameid("wmv"), makeNameid("wmx"),
+                                        makeNameid("wvx")};
     return vids;
 }
 
 const std::set<nameid>& photoExtensions()
 {
-    static const std::set<nameid> phts {MAKENAMEID3('3','d','s'), MAKENAMEID4('a','v','i','f'), MAKENAMEID3('b','m','p'),
-                                        MAKENAMEID4('b','t','i','f'), MAKENAMEID3('c','g','m'), MAKENAMEID3('c','m','x'),
-                                        MAKENAMEID3('d','j','v'), MAKENAMEID4('d','j','v','u'), MAKENAMEID3('d','w','g'),
-                                        MAKENAMEID3('d','x','f'), MAKENAMEID3('f','b','s'), MAKENAMEID2('f','h'),
-                                        MAKENAMEID3('f','h','4'), MAKENAMEID3('f','h','5'), MAKENAMEID3('f','h','7'),
-                                        MAKENAMEID3('f','h','c'), MAKENAMEID3('f','p','x'), MAKENAMEID3('f','s','t'),
-                                        MAKENAMEID2('g','3'), MAKENAMEID3('g','i','f'), MAKENAMEID4('h','e','i','c'),
-                                        MAKENAMEID4('h','e','i','f'), MAKENAMEID3('i','c','o'), MAKENAMEID3('i','e','f'),
-                                        MAKENAMEID3('j','p','e'), MAKENAMEID4('j','p','e','g'), MAKENAMEID3('j','p','g'),
-                                        MAKENAMEID3('k','t','x'), MAKENAMEID3('m','d','i'), MAKENAMEID3('m','m','r'),
-                                        MAKENAMEID3('n','p','x'), MAKENAMEID3('p','b','m'), MAKENAMEID3('p','c','t'),
-                                        MAKENAMEID3('p','c','x'), MAKENAMEID3('p','g','m'), MAKENAMEID3('p','i','c'),
-                                        MAKENAMEID3('p','n','g'), MAKENAMEID3('p','n','m'), MAKENAMEID3('p','p','m'),
-                                        MAKENAMEID3('p','s','d'), MAKENAMEID3('r','a','s'), MAKENAMEID3('r','g','b'),
-                                        MAKENAMEID3('r','l','c'), MAKENAMEID3('s','g','i'), MAKENAMEID3('s','i','d'),
-                                        MAKENAMEID3('s','v','g'), MAKENAMEID4('s','v','g','z'), MAKENAMEID3('t','g','a'),
-                                        MAKENAMEID3('t','i','f'), MAKENAMEID4('t','i','f','f'), MAKENAMEID3('u','v','g'),
-                                        MAKENAMEID3('u','v','i'), MAKENAMEID4('u','v','v','g'), MAKENAMEID4('u','v','v','i'),
-                                        MAKENAMEID4('w','b','m','p'), MAKENAMEID3('w','d','p'), MAKENAMEID4('w','e','b','p'),
-                                        MAKENAMEID3('x','b','m'), MAKENAMEID3('x','i','f'), MAKENAMEID3('x','p','m'),
-                                        MAKENAMEID3('x','w','d')};
+    static const std::set<nameid> phts {makeNameid("3ds"), makeNameid("avif"), makeNameid("bmp"),
+                                        makeNameid("btif"), makeNameid("cgm"), makeNameid("cmx"),
+                                        makeNameid("djv"), makeNameid("djvu"), makeNameid("dwg"),
+                                        makeNameid("dxf"), makeNameid("fbs"), makeNameid("fh"),
+                                        makeNameid("fh4"), makeNameid("fh5"), makeNameid("fh7"),
+                                        makeNameid("fhc"), makeNameid("fpx"), makeNameid("fst"),
+                                        makeNameid("g3"), makeNameid("gif"), makeNameid("heic"),
+                                        makeNameid("heif"), makeNameid("ico"), makeNameid("ief"),
+                                        makeNameid("jpe"), makeNameid("jpeg"), makeNameid("jpg"),
+                                        makeNameid("jxl"), makeNameid("ktx"), makeNameid("mdi"),
+                                        makeNameid("mmr"), makeNameid("npx"), makeNameid("pbm"),
+                                        makeNameid("pct"), makeNameid("pcx"), makeNameid("pgm"),
+                                        makeNameid("pic"), makeNameid("png"), makeNameid("pnm"),
+                                        makeNameid("ppm"),  makeNameid("psd"), makeNameid("ras"),
+                                        makeNameid("rgb"),  makeNameid("rlc"), makeNameid("sgi"),
+                                        makeNameid("sid"), makeNameid("svg"), makeNameid("svgz"),
+                                        makeNameid("tga"), makeNameid("tif"), makeNameid("tiff"),
+                                        makeNameid("uvg"), makeNameid("uvi"), makeNameid("uvvg"),
+                                        makeNameid("uvvi"), makeNameid("wbmp"), makeNameid("wdp"),
+                                        makeNameid("webp"), makeNameid("xbm"), makeNameid("xif"),
+                                        makeNameid("xpm"), makeNameid("xwd")};
     return phts;
 }
 
 const std::set<nameid>& photoRawExtensions()
 {
-    static const std::set<nameid> phrs {MAKENAMEID3('3','f','r'), MAKENAMEID3('a','r','i'), MAKENAMEID3('a','r','q'),
-                                        MAKENAMEID3('a','r','w'), MAKENAMEID3('b','a','y'), MAKENAMEID3('b','m','q'),
-                                        MAKENAMEID3('c','a','p'), MAKENAMEID4('c','i','f','f'), MAKENAMEID4('c','i','n','e'),
-                                        MAKENAMEID3('c','r','2'), MAKENAMEID3('c','r','3'), MAKENAMEID3('c','r','w'),
-                                        MAKENAMEID3('c','s','1'), MAKENAMEID3('d','c','2'), MAKENAMEID3('d','c','r'),
-                                        MAKENAMEID3('d','n','g'), MAKENAMEID3('d','r','f'), MAKENAMEID3('d','s','c'),
-                                        MAKENAMEID3('e','i','p'), MAKENAMEID3('e','r','f'), MAKENAMEID3('f','f','f'),
-                                        MAKENAMEID2('i','a'), MAKENAMEID3('i','i','q'), MAKENAMEID3('k','2','5'),
-                                        MAKENAMEID3('k','c','2'), MAKENAMEID3('k','d','c'), MAKENAMEID3('m','d','c'),
-                                        MAKENAMEID3('m','e','f'), MAKENAMEID3('m','o','s'), MAKENAMEID3('m','r','w'),
-                                        MAKENAMEID3('n','e','f'), MAKENAMEID3('n','r','w'), MAKENAMEID3('o','b','m'),
-                                        MAKENAMEID3('o','r','f'), MAKENAMEID3('o','r','i'), MAKENAMEID3('p','e','f'),
-                                        MAKENAMEID3('p','t','x'), MAKENAMEID3('p','x','n'), MAKENAMEID3('q','t','k'),
-                                        MAKENAMEID3('r','a','f'), MAKENAMEID3('r','a','w'), MAKENAMEID3('r','d','c'),
-                                        MAKENAMEID3('r','w','2'), MAKENAMEID3('r','w','l'), MAKENAMEID3('r','w','z'),
-                                        MAKENAMEID3('s','r','2'), MAKENAMEID3('s','r','f'), MAKENAMEID3('s','r','w'),
-                                        MAKENAMEID3('s','t','i'), MAKENAMEID3('x','3','f')};
+    static const std::set<nameid> phrs {makeNameid("3fr"), makeNameid("ari"), makeNameid("arq"),
+                                        makeNameid("arw"), makeNameid("bay"), makeNameid("bmq"),
+                                        makeNameid("cap"), makeNameid("ciff"), makeNameid("cine"),
+                                        makeNameid("cr2"), makeNameid("cr3"), makeNameid("crw"),
+                                        makeNameid("cs1"), makeNameid("dc2"), makeNameid("dcr"),
+                                        makeNameid("dng"), makeNameid("drf"), makeNameid("dsc"),
+                                        makeNameid("eip"), makeNameid("erf"), makeNameid("fff"),
+                                        makeNameid("ia"), makeNameid("iiq"), makeNameid("k25"),
+                                        makeNameid("kc2"), makeNameid("kdc"), makeNameid("mdc"),
+                                        makeNameid("mef"), makeNameid("mos"), makeNameid("mrw"),
+                                        makeNameid("nef"), makeNameid("nrw"), makeNameid("obm"),
+                                        makeNameid("orf"), makeNameid("ori"), makeNameid("pef"),
+                                        makeNameid("ptx"), makeNameid("pxn"), makeNameid("qtk"),
+                                        makeNameid("raf"), makeNameid("raw"), makeNameid("rdc"),
+                                        makeNameid("rw2"), makeNameid("rwl"), makeNameid("rwz"),
+                                        makeNameid("sr2"), makeNameid("srf"), makeNameid("srw"),
+                                        makeNameid("sti"), makeNameid("x3f")};
     return phrs;
 }
 
 const std::set<nameid>& photoImageDefExtension()
 {
-    static const std::set<nameid> phis {MAKENAMEID3('b','m','p'), MAKENAMEID3('g','i','f'), MAKENAMEID3('j','p','g'),
-                                        MAKENAMEID4('j','p','e','g'), MAKENAMEID3('p','n','g')};
+    static const std::set<nameid> phis {makeNameid("bmp"), makeNameid("gif"), makeNameid("jpg"),
+                                        makeNameid("jpeg"), makeNameid("png")};
     return phis;
 }
 
@@ -631,7 +632,7 @@ bool Node::serialize(string* d) const
     {
         auto authKeySize = (char)plink->mAuthKey.size();
         d->append((char*)&authKeySize, sizeof(authKeySize));
-        d->append(plink->mAuthKey.data(), authKeySize);
+        d->append(plink->mAuthKey.data(), static_cast<size_t>(authKeySize));
     }
     else
     {
@@ -657,11 +658,11 @@ bool Node::serialize(string* d) const
         numshares = 0;
         if (outshares)
         {
-            numshares = static_cast<short int>(numshares + outshares->size());
+            numshares += static_cast<short int>(outshares->size());
         }
         if (pendingshares)
         {
-            numshares = static_cast<short int>(numshares + pendingshares->size());
+            numshares += static_cast<short int>(pendingshares->size());
         }
     }
 
@@ -737,18 +738,18 @@ byte* Node::decryptattr(SymmCipher* key, const char* attrstring, size_t attrstrl
     if (attrstrlen)
     {
         int l = int(attrstrlen * 3 / 4 + 3);
-        auto buf = std::make_unique<byte[]>(l);
+        auto buf = std::make_unique<byte[]>(static_cast<size_t>(l));
 
         l = Base64::atob(attrstring, buf.get(), l);
 
         if (!(l & (SymmCipher::BLOCKSIZE - 1)))
         {
-            if (!key->cbc_decrypt(buf.get(), l))
+            if (!key->cbc_decrypt(buf.get(), static_cast<size_t>(l)))
             {
                 return nullptr;
             }
 
-            if (!memcmp(buf.get(), "MEGA{\"", 6))
+            if (Utils::startswith(reinterpret_cast<const char*>(buf.get()), "MEGA{\""))
             {
                 return buf.release();
             }
@@ -796,39 +797,54 @@ void Node::setattr()
     byte* buf;
     SymmCipher* cipher;
 
-    if (attrstring && (cipher = nodecipher()) && (buf = decryptattr(cipher, attrstring->c_str(), attrstring->size())))
+    if (!attrstring)
     {
-        AttrMap oldAttrs(attrs);
-        attrs.map.clear();
-        attrs.fromjson(reinterpret_cast<char*>(buf) + 5);
-
-        auto it = attrs.map.find('n');
-        if (it != std::end(attrs.map)) LocalPath::utf8_normalize(&it->second);
-
-        changed.name = attrs.hasDifferentValue('n', oldAttrs.map);
-        changed.favourite = attrs.hasDifferentValue(AttrMap::string2nameid("fav"), oldAttrs.map);
-        changed.sensitive = attrs.hasDifferentValue(AttrMap::string2nameid("sen"), oldAttrs.map);
-
-        const auto pwdNameid = AttrMap::string2nameid(MegaClient::NODE_ATTR_PASSWORD_MANAGER);
-        changed.pwd = attrs.hasDifferentValue(pwdNameid, oldAttrs.map);
-
-        const auto descriptionNameid = AttrMap::string2nameid(MegaClient::NODE_ATTRIBUTE_DESCRIPTION);
-        changed.description = attrs.hasDifferentValue(descriptionNameid, oldAttrs.map);
-
-        const auto tagsNameid = AttrMap::string2nameid(MegaClient::NODE_ATTRIBUTE_TAGS);
-        changed.tags = attrs.hasDifferentValue(tagsNameid, oldAttrs.map);
-
-        setfingerprint();
-
-        delete[] buf;
-
-        attrstring.reset();
+        return;
     }
+
+    cipher = nodecipher();
+    if (!cipher)
+    {
+        return;
+    }
+
+    buf = decryptattr(cipher, attrstring->c_str(), attrstring->size());
+    if (!buf)
+    {
+        return;
+    }
+
+    AttrMap oldAttrs(attrs);
+    attrs.map.clear();
+    attrs.fromjson(reinterpret_cast<char*>(buf) + 5);
+
+    auto it = attrs.map.find('n');
+    if (it != std::end(attrs.map))
+        LocalPath::utf8_normalize(&it->second);
+
+    changed.name = attrs.hasDifferentValue('n', oldAttrs.map);
+    changed.favourite = attrs.hasDifferentValue(AttrMap::string2nameid("fav"), oldAttrs.map);
+    changed.sensitive = attrs.hasDifferentValue(AttrMap::string2nameid("sen"), oldAttrs.map);
+
+    const auto pwdNameid = AttrMap::string2nameid(MegaClient::NODE_ATTR_PASSWORD_MANAGER);
+    changed.pwd = attrs.hasDifferentValue(pwdNameid, oldAttrs.map);
+
+    const auto descriptionNameid = AttrMap::string2nameid(MegaClient::NODE_ATTRIBUTE_DESCRIPTION);
+    changed.description = attrs.hasDifferentValue(descriptionNameid, oldAttrs.map);
+
+    const auto tagsNameid = AttrMap::string2nameid(MegaClient::NODE_ATTRIBUTE_TAGS);
+    changed.tags = attrs.hasDifferentValue(tagsNameid, oldAttrs.map);
+
+    setfingerprint();
+
+    delete[] buf;
+
+    attrstring.reset();
 }
 
 nameid Node::sdsId()
 {
-    constexpr nameid nid = MAKENAMEID3('s', 'd', 's');
+    constexpr nameid nid = makeNameid("sds");
     return nid;
 }
 
@@ -989,10 +1005,10 @@ bool Node::hasName() const
 }
 
 // return file/folder name or special status strings
-const char* Node::displayname() const
+const char* Node::displayname(LogCondition log) const
 {
     // not yet decrypted
-    if (attrstring)
+    if (attrstring && !(log & LOG_CONDITION_DISABLE_NO_KEY))
     {
         LOG_debug << NO_KEY << " " << type << " " << size << " " << Base64Str<MegaClient::NODEHANDLE>(nodehandle);
         return NO_KEY.c_str();
@@ -1224,7 +1240,7 @@ bool Node::applykey()
     byte key[FILENODEKEYLENGTH];
     unsigned keylength = (type == FILENODE) ? FILENODEKEYLENGTH : FOLDERNODEKEYLENGTH;
 
-    if (client->decryptkey(k, key, keylength, sc, 0, nodehandle))
+    if (client->decryptkey(k, key, static_cast<int>(keylength), sc, 0, nodehandle))
     {
         std::string undecryptedKey = nodekeydata;
         client->mAppliedKeyNodeCount++;
@@ -1281,7 +1297,7 @@ bool Node::testShareKey(const byte *shareKey)
     unsigned keylength = (type == FILENODE) ? FILENODEKEYLENGTH : FOLDERNODEKEYLENGTH;
     const char* k = nodekeydata.c_str() + p + mark.size();
     SymmCipher *sc = client->getRecycledTemporaryNodeCipher(shareKey);
-    if (!client->decryptkey(k, key, keylength, sc, 0, UNDEF))
+    if (!client->decryptkey(k, key, static_cast<int>(keylength), sc, 0, UNDEF))
     {
         // This should never happen (malformed key)
         LOG_err << "Malformed node key detected";
@@ -1378,7 +1394,7 @@ unsigned Node::depth() const
 }
 
 // returns 1 if n is under p, 0 otherwise
-bool Node::isbelow(Node* p) const
+bool Node::isbelow(const Node* p) const
 {
     const Node* n = this;
 
@@ -1434,19 +1450,37 @@ void Node::setpubliclink(handle ph, m_time_t cts, m_time_t ets, bool takendown, 
     }
 }
 
+bool Node::isCreditCardNode() const
+{
+    if (!isPasswordManagerNode())
+        return false;
+
+    const auto pwmData = attrs.getNestedJsonObject(MegaClient::NODE_ATTR_PASSWORD_MANAGER);
+    return pwmData && MegaClient::isPwmDataOfType(*pwmData, MegaClient::PwmEntryType::CREDIT_CARD);
+}
+
 bool Node::isPasswordNode() const
+{
+    if (!isPasswordManagerNode())
+        return false;
+
+    const auto pwmData = attrs.getNestedJsonObject(MegaClient::NODE_ATTR_PASSWORD_MANAGER);
+    return pwmData && MegaClient::isPwmDataOfType(*pwmData, MegaClient::PwmEntryType::PASSWORD);
+}
+
+bool Node::isPasswordManagerNode() const
 {
     return ((type == FOLDERNODE) &&
             (attrs.map.contains(AttrMap::string2nameid(MegaClient::NODE_ATTR_PASSWORD_MANAGER))));
 }
 
-bool Node::isPasswordNodeFolder() const
+bool Node::isPasswordManagerNodeFolder() const
 {
     assert(client);
     const auto nhBase = client->getPasswordManagerBase();
-    return ((type == FOLDERNODE) && (nodeHandle() == nhBase || isAncestor(nhBase))) && !isPasswordNode();
+    return ((type == FOLDERNODE) && (nodeHandle() == nhBase || isAncestor(nhBase))) &&
+           !isPasswordManagerNode();
 }
-
 
 bool NodeData::readComponents()
 {
@@ -1503,7 +1537,7 @@ bool NodeData::readComponents()
                 return false;
             }
 
-            mNodeKey.assign(ptr, nodeKeyLen);
+            mNodeKey.assign(ptr, static_cast<size_t>(nodeKeyLen));
             ptr += nodeKeyLen;
         }
     }
@@ -1556,7 +1590,7 @@ bool NodeData::readComponents()
             {
                 return false;
             }
-            mAuthKey.assign(ptr, authKeySize);
+            mAuthKey.assign(ptr, static_cast<size_t>(authKeySize));
             ptr += authKeySize;
         }
     }
@@ -1955,7 +1989,7 @@ void LocalNode::setnameparent(LocalNode* newparent, const LocalPath& newlocalpat
     if (shortnameChange)
     {
         // set new shortname
-        slocalname = move(newshortname);
+        slocalname = std::move(newshortname);
     }
 
 
@@ -2024,9 +2058,9 @@ void LocalNode::moveContentTo(LocalNode* ln, LocalPath& fullPath, bool setScanAg
     for (auto& c : children) workingList.push_back(c.second);
     for (auto& c : workingList)
     {
-        auto restoreLen = makeScopedSizeRestorer(fullPath);
-        fullPath.appendWithSeparator(c->localname, true);
-        c->setnameparent(ln, fullPath.leafName(), sync->syncs.fsaccess->fsShortname(fullPath));
+        LocalPath newpath{fullPath};
+        newpath.appendWithSeparator(c->localname, true);
+        c->setnameparent(ln, newpath.leafName(), sync->syncs.fsaccess->fsShortname(newpath));
 
         // if moving between syncs, removal from old sync db is already done
         ln->sync->statecacheadd(c);
@@ -2037,7 +2071,22 @@ void LocalNode::moveContentTo(LocalNode* ln, LocalPath& fullPath, bool setScanAg
         }
     }
 
-    ln->resetTransfer(move(transferSP));
+    if (transferSP)
+    {
+        if (const auto isUpload = dynamic_cast<SyncUpload_inClient*>(transferSP.get()) != nullptr;
+            isUpload)
+        {
+            LOG_debug << "Moving upload (" << transferSP->getLocalname() << ") source from: '"
+                      << getLocalPath().toPath(false) << "' to '"
+                      << ln->getLocalPath().toPath(false) << "'";
+        }
+        else
+        {
+            LOG_debug << "Moving download (" << transferSP->getLocalname() << ") source from: '"
+                      << getCloudPath(true) << "' to '" << ln->getCloudPath(true) << "'";
+        }
+    }
+    ln->resetTransfer(std::move(transferSP));
 
     LocalTreeProcUpdateTransfers tput;
     tput.proc(*sync->syncs.fsaccess, ln);
@@ -2328,21 +2377,36 @@ bool LocalNode::checkForScanBlocked(FSNode* fsNode)
 {
     if (rareRO().scanBlocked && rare().scanBlocked->folderUnreadable)
     {
+        const auto cleanRareFieldsIfFilesUnreachable = [this]() -> bool
+        {
+            if (rare().scanBlocked->filesUnreadable)
+                return false;
+            rare().scanBlocked.reset();
+            trimRareFields();
+            return true;
+        };
+
+        // The blocked path does not exist anymore?
+        if (!fsNode)
+        {
+            LOG_verbose << sync->syncname
+                        << "Recovered from being scan blocked after deleting fsNode";
+            if (cleanRareFieldsIfFilesUnreachable())
+                return false;
+        }
+
         // Have we recovered?
         if (fsNode && fsNode->type != TYPE_UNKNOWN && !fsNode->isBlocked)
         {
             LOG_verbose << sync->syncname << "Recovered from being scan blocked: " << getLocalPath();
 
             type = fsNode->type; // original scan may not have been able to discern type, fix it now
+            realScannedFingerprint = FileFingerprint();
             setScannedFsid(UNDEF, sync->syncs.localnodeByScannedFsid, fsNode->localname, FileFingerprint());
             sync->statecacheadd(this);
 
-            if (!rare().scanBlocked->filesUnreadable)
-            {
-                rare().scanBlocked.reset();
-                trimRareFields();
+            if (cleanRareFieldsIfFilesUnreachable())
                 return false;
-            }
         }
 
         LOG_verbose << sync->syncname << "Waiting on scan blocked timer, retry in ds: "
@@ -2541,7 +2605,10 @@ bool LocalNode::processBackgroundFolderScan(SyncRow& row, SyncPath& fullPath)
             }
 
             ourScanRequest = sync->syncs.mScanService->queueScan(fullPath.localPath,
-                row.fsNode->fsid, false, move(priorScanChildren), sync->syncs.waiter);
+                                                                 row.fsNode->fsid,
+                                                                 false,
+                                                                 std::move(priorScanChildren),
+                                                                 sync->syncs.waiter);
 
             rare().scanRequest = ourScanRequest;
             *availableScanSlot = ourScanRequest;
@@ -2776,7 +2843,7 @@ void LocalNode::setSyncedFsid(handle newfsid, fsid_localnode_map& fsidnodes, con
             (newshortname && slocalname && *newshortname != *slocalname))
     {
         // localname must always be set by this function, to maintain parent's child maps
-        setnameparent(parent, fsName, move(newshortname));
+        setnameparent(parent, fsName, std::move(newshortname));
     }
 
     // LOG_verbose << "localnode " << this << " fsid " << toHandle(fsid_lastSynced) << " localname " << fsName.toPath() << " parent " << parent;
@@ -2794,7 +2861,10 @@ void LocalNode::setSyncedFsid(handle newfsid, fsid_localnode_map& fsidnodes, con
 //        0 == compareUtf(localname, true, name, false, true));
 }
 
-void LocalNode::setScannedFsid(handle newfsid, fsid_localnode_map& fsidnodes, const LocalPath& fsName, const FileFingerprint& scanfp)
+void LocalNode::setScannedFsid(handle newfsid,
+                               fsid_localnode_map& fsidnodes,
+                               [[maybe_unused]] const LocalPath& fsName,
+                               const FileFingerprint& scanfp)
 {
     if (fsid_asScanned_it != fsidnodes.end())
     {
@@ -3026,19 +3096,21 @@ string LocalNode::debugGetParentList()
 
     for (const LocalNode* l = this; l != nullptr; l = l->parent)
     {
-        s += l->localname.toPath(false) + "(" + std::to_string((long long)(void*)l) + ") ";
+        s += l->localname.toPath(false) + "(" + std::to_string(reinterpret_cast<uintptr_t>(l)) +
+             ") ";
     }
     return s;
 }
 
 // locate child by localname or slocalname
-LocalNode* LocalNode::childbyname(LocalPath* localname)
+LocalNode* LocalNode::childbyname(LocalPath* localChildName)
 {
     localnode_map::iterator it;
 
-    if (!localname || ((it = children.find(*localname)) == children.end() && (it = schildren.find(*localname)) == schildren.end()))
+    if (!localChildName || ((it = children.find(*localChildName)) == children.end() &&
+                            (it = schildren.find(*localChildName)) == schildren.end()))
     {
-        return NULL;
+        return nullptr;
     }
 
     return it->second;
@@ -3085,6 +3157,17 @@ FSNode LocalNode::getScannedFSDetails() const
     return n;
 }
 
+bool LocalNode::hasPendingTransfers() const
+{
+    return transferSP != nullptr ||
+           std::any_of(std::begin(children),
+                       std::end(children),
+                       [](const auto& p)
+                       {
+                           return p.second && p.second->hasPendingTransfers();
+                       });
+}
+
 void LocalNode::updateMoveInvolvement()
 {
     bool moveInvolved = hasRare() && (rare().moveToHere || rare().moveFromHere);
@@ -3098,53 +3181,31 @@ void LocalNode::updateMoveInvolvement()
     }
 }
 
-void LocalNode::queueClientUpload(shared_ptr<SyncUpload_inClient> upload, VersioningOption vo, bool queueFirst, NodeHandle ovHandleIfShortcut)
+bool LocalNode::queueClientUpload(shared_ptr<SyncUpload_inClient> upload,
+                                  const VersioningOption vo,
+                                  const bool queueFirst,
+                                  const NodeHandle ovHandleIfShortcut)
 {
     resetTransfer(upload);
 
-    sync->syncs.queueClient([upload, vo, queueFirst, ovHandleIfShortcut](MegaClient& mc, TransferDbCommitter& committer)
+    if (mUploadThrottling.checkUploadThrottling(
+            sync->syncs.maxUploadsBeforeThrottle(),
+            sync->syncs.uploadCounterInactivityExpirationTime()))
+    {
+        sync->syncs.addToDelayedUploads(
+            DelayedSyncUpload(std::move(upload), vo, queueFirst, ovHandleIfShortcut));
+        return false;
+    }
+
+    sync->syncs.queueClient(
+        [syncUpload = std::move(upload), vo, queueFirst, ovHandleIfShortcut](
+            MegaClient& mc,
+            TransferDbCommitter& committer)
         {
-            // Can we do it by Node clone if there is a matching file already in the cloud?
-            Node* cloneNode = nullptr;
-            sharedNode_vector v = mc.mNodeManager.getNodesByFingerprint(*upload);
-            for (auto& n: v)
-            {
-                string ext1, ext2;
-                mc.fsaccess->getextension(upload->getLocalname(), ext1);
-                n->getExtension(ext2, n->displayname());
-                if (!ext1.empty() && ext1[0] == '.') ext1.erase(0, 1);
-                if (!ext2.empty() && ext2[0] == '.') ext2.erase(0, 1);
-
-                if (mc.treatAsIfFileDataEqual(*n, ext1, *upload, ext2))
-                {
-                    cloneNode = n.get();
-                    if (cloneNode->hasZeroKey())
-                    {
-                        LOG_warn << "Clone node key is a zero key!! Avoid cloning node to generate a new key [cloneNode path = '" << cloneNode->displaypath() << "', sourceLocalname = '" << upload->sourceLocalname << "']";
-                        mc.sendevent(99486, "Node has a zerokey");
-                        cloneNode = nullptr;
-                    }
-                    break;
-                }
-            }
-
-            if (cloneNode)
-            {
-                LOG_debug << "Cloning node rather than sync uploading: " << cloneNode->displaypath() << " for " << upload->sourceLocalname;
-                // completion function is supplied to putNodes command
-                upload->sendPutnodesToCloneNode(&mc, ovHandleIfShortcut, cloneNode);
-                upload->putnodesStarted = true;
-                upload->wasCompleted = true;
-            }
-            else
-            {
-                // upload will get called back on either completed() or termainted()
-                upload->tag = mc.nextreqtag();
-                upload->selfKeepAlive = upload;
-                mc.startxfer(PUT, upload.get(), committer, false, queueFirst, false, vo, nullptr, upload->tag);
-            }
+            clientUpload(mc, committer, std::move(syncUpload), vo, queueFirst, ovHandleIfShortcut);
         });
 
+    return true;
 }
 
 void LocalNode::queueClientDownload(shared_ptr<SyncDownload_inClient> download, bool queueFirst)
@@ -3181,7 +3242,7 @@ void LocalNode::resetTransfer(shared_ptr<SyncTransfer_inClient> p)
         }
     }
 
-    transferSP = move(p);
+    transferSP = std::move(p);
 }
 
 
@@ -3193,36 +3254,45 @@ void LocalNode::updateTransferLocalname()
     }
 }
 
-bool LocalNode::transferResetUnlessMatched(direction_t dir, const FileFingerprint& fingerprint)
+bool LocalNode::transferResetUnlessMatched(const direction_t dir,
+                                           const FileFingerprint& fingerprint)
 {
-    if (!transferSP) return true;
+    if (!transferSP)
+        return true;
 
-    auto uploadPtr = dynamic_cast<SyncUpload_inClient*>(transferSP.get());
+    const auto uploadPtr = dynamic_cast<SyncUpload_inClient*>(transferSP.get());
 
-    auto different =
-      dir != (uploadPtr ? PUT : GET)
-      || transferSP->fingerprint() != fingerprint;
+    const bool transferDirectionNeedsToChange = dir != (uploadPtr ? PUT : GET);
 
-    // todo: should we be more accurate than just fingerprint?
-    if (different || (transferSP->wasTerminated && transferSP->mError != API_EKEY
-                                                && transferSP->mError != API_EBLOCKED)) // A blocked file causes transfer termination. Avoid retrying the transfer unless unmatched: the node could have been replaced remotely (new version)
+    const auto different =
+        transferDirectionNeedsToChange || transferSP->fingerprint() != fingerprint;
+
+    const auto transferTerminatedAndIsRetryable = transferSP->wasTerminated &&
+                                                  transferSP->mError != API_EKEY &&
+                                                  transferSP->mError != API_EBLOCKED;
+
+    if (!different && !transferTerminatedAndIsRetryable)
+        return true;
+
+    if (uploadPtr && !mUploadThrottling.handleAbortUpload(*uploadPtr,
+                                                          transferDirectionNeedsToChange,
+                                                          fingerprint,
+                                                          sync->syncs.maxUploadsBeforeThrottle(),
+                                                          transferSP->getLocalname()))
     {
-        if (uploadPtr && uploadPtr->putnodesStarted)
-        {
-            return false;
-        }
-
-        LOG_debug << sync->syncname << "Cancelling superceded transfer of " << transferSP->getLocalname();
-        if (dir != (uploadPtr ? PUT : GET))
-        {
-            LOG_debug << sync->syncname << "Because transfer direction needs to change";
-        }
-        else
-        {
-            LOG_debug << sync->syncname << "Due to fingerprint change, was:" << transferSP->fingerprintDebugString() << " now:" << fingerprint.fingerprintDebugString();
-        }
-        resetTransfer(nullptr);
+        return !uploadPtr->putnodesStarted;
     }
+
+    LOG_debug << sync->syncname << "Cancelling superceded transfer of "
+              << transferSP->getLocalname() << ". Reason: "
+              << (transferDirectionNeedsToChange ?
+                      "Transfer direction needs to change." :
+                      (transferSP->wasTerminated ?
+                           "Terminated after failing." :
+                           "Fingerprint change. Was: " + transferSP->fingerprintDebugString() +
+                               ", now: " + fingerprint.fingerprintDebugString()));
+
+    resetTransfer(nullptr);
     return true;
 }
 
@@ -3266,11 +3336,17 @@ bool LocalNodeCore::write(string& destination, uint32_t parentID) const
 
     // first flag indicates we are storing slocalname.
     // Storing it is much, much faster than looking it up on startup.
-    w.serializeexpansionflags(1, 1);
+    w.serializeexpansionflags(1, 1, 1);
     auto tmpstr = slocalname ? slocalname->platformEncoded() : string();
     w.serializepstr(slocalname ? &tmpstr : nullptr);
 
     w.serializebool(namesSynchronized);
+
+    if (type == FILENODE)
+    {
+        // Difference between realScannedFingerprint and scannedFingerprint is only mtime
+        w.serializecompressedi64(realScannedFingerprint.mtime);
+    }
 
     return true;
 }
@@ -3349,7 +3425,7 @@ bool LocalNodeCore::read(const string& source, uint32_t& parentID)
 
     CacheableReader r(source);
 
-    nodetype_t type;
+    nodetype_t nodeType;
     m_off_t size;
 
     if (!r.unserializei64(size)) return false;
@@ -3357,34 +3433,34 @@ bool LocalNodeCore::read(const string& source, uint32_t& parentID)
     if (size < 0 && size >= -FOLDERNODE)
     {
         // will any compiler optimize this to a const assignment?
-        type = (nodetype_t)-size;
+        nodeType = (nodetype_t)-size;
         size = 0;
     }
     else
     {
-        type = FILENODE;
+        nodeType = FILENODE;
     }
 
     handle fsid;
     handle h = 0;
-    string localname, shortname;
+    string name, shortname;
     m_time_t mtime = 0;
     int32_t crc[4];
     memset(crc, 0, sizeof crc);
     byte syncable = 1;
     unsigned char expansionflags[8] = { 0 };
     bool ns = false;
+    m_time_t extraMtime = 0;
 
-    if (!r.unserializehandle(fsid) ||
-        !r.unserializeu32(parentID) ||
-        !r.unserializenodehandle(h) ||
-        !r.unserializestring(localname) ||
-        (type == FILENODE && !r.unserializebinary((byte*)crc, sizeof(crc))) ||
-        (type == FILENODE && !r.unserializecompressedi64(mtime)) ||
+    if (!r.unserializehandle(fsid) || !r.unserializeu32(parentID) || !r.unserializenodehandle(h) ||
+        !r.unserializestring(name) ||
+        (nodeType == FILENODE && !r.unserializebinary((byte*)crc, sizeof(crc))) ||
+        (nodeType == FILENODE && !r.unserializecompressedi64(mtime)) ||
         (r.hasdataleft() && !r.unserializebyte(syncable)) ||
-        (r.hasdataleft() && !r.unserializeexpansionflags(expansionflags, 2)) ||
+        (r.hasdataleft() && !r.unserializeexpansionflags(expansionflags, 3)) ||
         (expansionflags[0] && !r.unserializecstr(shortname, false)) ||
-        (expansionflags[1] && !r.unserializebool(ns)))
+        (expansionflags[1] && !r.unserializebool(ns)) ||
+        (expansionflags[2] && nodeType == FILENODE && !r.unserializecompressedi64(extraMtime)))
     {
         LOG_err << "LocalNode unserialization failed at field " << r.fieldnum;
         assert(false);
@@ -3392,10 +3468,10 @@ bool LocalNodeCore::read(const string& source, uint32_t& parentID)
     }
     assert(!r.hasdataleft());
 
-    this->type = type;
+    type = nodeType;
     this->syncedFingerprint.size = size;
     this->fsid_lastSynced = fsid;
-    this->localname = LocalPath::fromPlatformEncodedRelative(localname);
+    localname = LocalPath::fromPlatformEncodedRelative(name);
     this->slocalname.reset(shortname.empty() ? nullptr : new LocalPath(LocalPath::fromPlatformEncodedRelative(shortname)));
     this->slocalname_in_db = 0 != expansionflags[0];
     this->namesSynchronized = ns;
@@ -3407,6 +3483,15 @@ bool LocalNodeCore::read(const string& source, uint32_t& parentID)
 
     // previously we scanned and created the LocalNode, but we had not set syncedFingerprint
     this->syncedCloudNodeHandle.set6byte(h);
+
+    bool hasRealScannedFingerprint = expansionflags[2];
+    if (hasRealScannedFingerprint)
+    {
+        memcpy(this->realScannedFingerprint.crc.data(), crc, sizeof crc);
+        this->realScannedFingerprint.mtime = extraMtime;
+        this->realScannedFingerprint.isvalid = extraMtime != 0;
+        this->realScannedFingerprint.size = size;
+    }
 
     return true;
 }
@@ -3449,7 +3534,12 @@ auto LocalNode::WatchHandle::operator=(std::nullptr_t) -> WatchHandle&
 
     auto& node = *mEntry->second.first;
     auto& sync = *node.sync;
-    auto& notifier = static_cast<LinuxDirNotify&>(*sync.dirnotify);
+    auto& notifier =
+#ifndef __ANDROID__
+        static_cast<LinuxDirNotify&>(*sync.dirnotify);
+#else
+        static_cast<AndroidDirNotify&>(*sync.dirnotify);
+#endif
 
     notifier.removeWatch(mEntry);
     invalidate();
@@ -3484,7 +3574,12 @@ WatchResult LocalNode::watch(const LocalPath& path, handle fsid)
     }
 
     // Get our hands on the notifier.
-    auto& notifier = static_cast<LinuxDirNotify&>(*sync->dirnotify);
+    auto& notifier =
+#ifndef __ANDROID__
+        static_cast<LinuxDirNotify&>(*sync->dirnotify);
+#else
+        static_cast<AndroidDirNotify&>(*sync->dirnotify);
+#endif
 
     // Add the watch.
     auto result = notifier.addWatch(*this, path, fsid);
@@ -3558,7 +3653,9 @@ bool LocalNode::loadFilters(const LocalPath& path)
     return fc->mLoadSucceeded;
 }
 
-ExclusionState LocalNode::calcExcluded(RemotePathPair namePath, nodetype_t type, bool inherited) const
+ExclusionState LocalNode::calcExcluded(RemotePathPair namePath,
+                                       nodetype_t applicableType,
+                                       bool inherited) const
 {
     // This specialization only makes sense for directories.
     assert(this->type == FOLDERNODE);
@@ -3574,7 +3671,7 @@ ExclusionState LocalNode::calcExcluded(RemotePathPair namePath, nodetype_t type,
             inherited = inherited || node != this;
 
             // Check for a filter match.
-            auto result = node->filterChainRO().match(namePath, type, inherited);
+            auto result = node->filterChainRO().match(namePath, applicableType, inherited);
 
             // Was the file matched by any filters?
             if (result != ES_UNMATCHED)
@@ -3770,16 +3867,18 @@ LocalNode::exclusionState(const PathType& path, nodetype_t type, m_off_t size) c
 template ExclusionState LocalNode::exclusionState(const LocalPath& path, nodetype_t type, m_off_t size) const;
 template ExclusionState LocalNode::exclusionState(const RemotePath& path, nodetype_t type, m_off_t size) const;
 
-ExclusionState LocalNode::exclusionState(const string& name, nodetype_t type, m_off_t size) const
+ExclusionState LocalNode::exclusionState(const string& name,
+                                         nodetype_t applicableType,
+                                         m_off_t size) const
 {
     assert(this->type == FOLDERNODE);
 
     // Consider providing a specialized implementation to avoid conversion.
     auto fsAccess = sync->syncs.fsaccess.get();
     auto fsType = sync->mFilesystemType;
-    auto localname = LocalPath::fromRelativeName(name, *fsAccess, fsType);
+    LocalPath absoluteName = LocalPath::fromRelativeName(name, *fsAccess, fsType);
 
-    return exclusionState(localname, type, size);
+    return exclusionState(absoluteName, applicableType, size);
 }
 
 ExclusionState LocalNode::exclusionState() const

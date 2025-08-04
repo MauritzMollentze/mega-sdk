@@ -39,8 +39,11 @@
 #endif
 
 #ifdef __ANDROID__
+#include <mega/android/androidFileSystem.h>
+
 #include <jni.h>
-extern JavaVM *MEGAjvm;
+extern JavaVM* MEGAjvm;
+extern jclass fileWrapper;
 #endif
 
 #if defined(__MACH__) && !(TARGET_OS_IPHONE)
@@ -139,14 +142,14 @@ AdjustBasePathResult adjustBasePath(const LocalPath& path)
 
     // No base path.
     if (basePath.empty())
-        return path.rawValue();
+        return path.asPlatformEncoded(false);
 
     // Path is absolute.
     if (path.beginsWithSeparator())
-        return path.rawValue();
+        return path.asPlatformEncoded(false);
 
     // Compute absolute path.
-    basePath.append(path.rawValue());
+    basePath.append(path.asPlatformEncoded(false));
 
     // Return absolute path to caller.
     return basePath;
@@ -156,7 +159,7 @@ AdjustBasePathResult adjustBasePath(const LocalPath& path)
 
 AdjustBasePathResult adjustBasePath(const LocalPath& path)
 {
-    return path.rawValue();
+    return path.asPlatformEncoded(false);
 }
 
 #endif // ! USE_IOS
@@ -179,18 +182,6 @@ void FileSystemAccess::setMinimumDirectoryPermissions(int permissions)
 void FileSystemAccess::setMinimumFilePermissions(int permissions)
 {
     mMinimumFilePermissions = permissions & 07777;
-}
-
-auto LocalPath::asPlatformEncoded(bool) const -> string_type
-{
-    return localpath;
-}
-bool LocalPath::isRootPath() const
-{
-    if (isFromRoot)
-        return localpath.size() == 1 && localpath.back() == '/';
-
-    return false;
 }
 
 int platformCompareUtf(const string& p1, bool unescape1, const string& p2, bool unescape2)
@@ -597,7 +588,14 @@ int PosixFileAccess::stealFileDescriptor()
     return toret;
 }
 
-bool PosixFileAccess::fopen(const LocalPath& f, bool read, bool write, FSLogging fsl, DirAccess* iteratingDir, bool, bool skipcasecheck, LocalPath* actualLeafNameIfDifferent)
+bool PosixFileAccess::fopen(const LocalPath& f,
+                            bool read,
+                            bool write,
+                            FSLogging fsl,
+                            DirAccess* iteratingDir,
+                            bool,
+                            [[maybe_unused]] bool skipcasecheck,
+                            LocalPath* /*actualLeafNameIfDifferent*/)
 {
     struct stat statbuf;
 
@@ -617,17 +615,15 @@ bool PosixFileAccess::fopen(const LocalPath& f, bool read, bool write, FSLogging
     if (!write)
     {
         char resolved_path[PATH_MAX];
-        if (memcmp(fstr.c_str(), ".", 2) && memcmp(fstr.c_str(), "..", 3)
-                && (statok || !lstat(fstr.c_str(), &statbuf) )
-                && !S_ISLNK(statbuf.st_mode)
-                && realpath(fstr.c_str(), resolved_path) == resolved_path)
+        if (fstr != "." && fstr != ".." && (statok || !lstat(fstr.c_str(), &statbuf)) &&
+            !S_ISLNK(statbuf.st_mode) && realpath(fstr.c_str(), resolved_path) == resolved_path)
         {
             const char *fname;
             size_t fnamesize;
             if ((fname = strrchr(fstr.c_str(), '/')))
             {
                 fname++;
-                fnamesize = fstr.size() - (fname - fstr.c_str());
+                fnamesize = fstr.size() - (static_cast<size_t>(fname - fstr.c_str()));
             }
             else
             {
@@ -658,8 +654,6 @@ bool PosixFileAccess::fopen(const LocalPath& f, bool read, bool write, FSLogging
             }
         }
     }
-#else
-    (void)skipcasecheck; // avoid unused parameter warning
 #endif
 
 #ifndef HAVE_FDOPENDIR
@@ -721,11 +715,34 @@ bool PosixFileAccess::fopen(const LocalPath& f, bool read, bool write, FSLogging
 
     assert(fd < 0 && "There should be no opened file descriptor at this point");
     sysclose();
-    // if mFollowSymLinks is true (open normally: it will open the targeted file/folder),
-    // otherwise, get the file descriptor for symlinks in case it is a sync link (notice O_PATH invalidates read/only flags)
+
+    // Compute open flags.
+    auto openFlags = [&]()
+    {
+        // We're dealing with a symlink that isn't being followed.
+        if (!mFollowSymLinks && mIsSymLink)
+            return O_NOFOLLOW | O_PATH;
+
+        // Sanity.
+        assert(read || write);
+
+        // Caller only wants to read the file.
+        if (!write)
+            return O_RDONLY;
+
+        // Assume caller wants to read and write the file.
+        auto flags = O_CREAT | O_RDWR;
+
+        // Caller only wants to write the file.
+        if (!read)
+            flags = (flags & ~O_RDWR) | O_WRONLY;
+
+        // Return flags to caller.
+        return flags;
+    }();
 
     errorcode = 0;
-    fd = open(fstr.c_str(), (!mFollowSymLinks && mIsSymLink) ? (O_PATH | O_NOFOLLOW) : (write ? (read ? O_RDWR : O_WRONLY | O_CREAT) : O_RDONLY), defaultfilepermissions);
+    fd = open(fstr.c_str(), openFlags, defaultfilepermissions);
     if (fd < 0)
     {
         errorcode = errno; // streaming may set errno
@@ -874,7 +891,7 @@ bool PosixFileSystemAccess::cwd_static(LocalPath& path)
 // wake up from filesystem updates
 
 #ifdef __linux__
-void LinuxFileSystemAccess::addevents(Waiter* waiter, int flags)
+void LinuxFileSystemAccess::addevents([[maybe_unused]] Waiter* waiter, int /*flags*/)
 {
 #ifdef ENABLE_SYNC
 
@@ -892,7 +909,7 @@ void LinuxFileSystemAccess::addevents(Waiter* waiter, int flags)
 }
 
 // read all pending inotify events and queue them for processing
-int LinuxFileSystemAccess::checkevents(Waiter* waiter)
+int LinuxFileSystemAccess::checkevents([[maybe_unused]] Waiter* waiter)
 {
     int result = 0;
 
@@ -950,7 +967,10 @@ int LinuxFileSystemAccess::checkevents(Waiter* waiter)
             }
 
             auto localName = LocalPath::fromPlatformEncodedRelative(name);
-            notifier.notify(notifier.fsEventq, &node, Notification::NEEDS_PARENT_SCAN, move(localName));
+            notifier.notify(notifier.fsEventq,
+                            &node,
+                            Notification::NEEDS_PARENT_SCAN,
+                            std::move(localName));
 
             // We need to rescan the directory if it's changed permissions.
             //
@@ -1030,7 +1050,7 @@ bool PosixFileSystemAccess::renamelocal(const LocalPath& oldname, const LocalPat
 
     target_exists = existingandcare  || errno == EEXIST || errno == EISDIR || errno == ENOTEMPTY || errno == ENOTDIR;
     target_name_too_long = errno == ENAMETOOLONG;
-    transient_error = !existingandcare && (errno == ETXTBSY || errno == EBUSY);
+    transient_error = !existingandcare && isTransient(errno);
 
     int e = errno;
     if (e != EEXIST  || !skip_targetexists_errorreport)
@@ -1068,7 +1088,9 @@ bool PosixFileSystemAccess::copylocal(const LocalPath& oldname, const LocalPath&
         if ((tfd = open(newnamestr.c_str(), O_WRONLY | O_CREAT | O_TRUNC, defaultfilepermissions)) >= 0)
         {
             umask(mode);
-            while (((t = read(sfd, buf, sizeof buf)) > 0) && write(tfd, buf, t) == t);
+            while (((t = read(sfd, buf, sizeof buf)) > 0) &&
+                   write(tfd, buf, static_cast<size_t>(t)) == t)
+                ;
 #endif
             close(tfd);
         }
@@ -1077,7 +1099,7 @@ bool PosixFileSystemAccess::copylocal(const LocalPath& oldname, const LocalPath&
             umask(mode);
             target_exists = errno == EEXIST;
             target_name_too_long = errno == ENAMETOOLONG;
-            transient_error = errno == ETXTBSY || errno == EBUSY;
+            transient_error = isTransient(errno);
 
             int e = errno;
             LOG_warn << "Unable to copy file. Error code: " << e;
@@ -1111,9 +1133,14 @@ bool PosixFileSystemAccess::unlinklocal(const LocalPath& name)
         return true;
     }
 
-    transient_error = errno == ETXTBSY || errno == EBUSY;
+    transient_error = isTransient(errno);
 
     return false;
+}
+
+bool PosixFileSystemAccess::isTransient(const int e)
+{
+    return e == ETXTBSY || e == EBUSY;
 }
 
 // delete all files, folders and symlinks contained in the specified folder
@@ -1152,17 +1179,18 @@ void PosixFileSystemAccess::emptydirlocal(const LocalPath& nameParam, dev_t base
                  || *d->d_name != '.'
                  || (d->d_name[1] && (d->d_name[1] != '.' || d->d_name[2])))
                 {
-                    auto restorer = makeScopedSizeRestorer(name);
+                    LocalPath newpath{name};
 
-                    name.appendWithSeparator(LocalPath::fromPlatformEncodedRelative(d->d_name), true);
+                    newpath.appendWithSeparator(LocalPath::fromPlatformEncodedRelative(d->d_name),
+                                                true);
 
-                    AdjustBasePathResult nameStr = adjustBasePath(name);
+                    AdjustBasePathResult nameStr = adjustBasePath(newpath);
 
                     if (!lstat(nameStr.c_str(), &statbuf))
                     {
                         if (!S_ISLNK(statbuf.st_mode) && S_ISDIR(statbuf.st_mode) && statbuf.st_dev == basedev)
                         {
-                            emptydirlocal(name, basedev);
+                            emptydirlocal(newpath, basedev);
                             removed |= !rmdir(nameStr.c_str());
                         }
                         else
@@ -1220,7 +1248,7 @@ bool PosixFileSystemAccess::rmdirlocal(const LocalPath& name)
         return true;
     }
 
-    transient_error = errno == ETXTBSY || errno == EBUSY;
+    transient_error = isTransient(errno);
 
     return false;
 }
@@ -1230,7 +1258,7 @@ bool PosixFileSystemAccess::mkdirlocal(const LocalPath& name, bool, bool logAlre
     AdjustBasePathResult nameStr = adjustBasePath(name);
 
     mode_t mode = umask(0);
-    bool r = !mkdir(nameStr.c_str(), defaultfolderpermissions);
+    bool r = !mkdir(nameStr.c_str(), static_cast<mode_t>(defaultfolderpermissions));
     umask(mode);
 
     if (!r)
@@ -1249,7 +1277,7 @@ bool PosixFileSystemAccess::mkdirlocal(const LocalPath& name, bool, bool logAlre
         {
             LOG_err << "Error creating local directory: " << nameStr << " errno: " << errno;
         }
-        transient_error = errno == ETXTBSY || errno == EBUSY;
+        transient_error = isTransient(errno);
     }
 
     return r;
@@ -1265,7 +1293,7 @@ bool PosixFileSystemAccess::setmtimelocal(const LocalPath& name, m_time_t mtime)
     if (!success)
     {
         LOG_err << "Error setting mtime: " << nameStr <<" mtime: "<< mtime << " errno: " << errno;
-        transient_error = errno == ETXTBSY || errno == EBUSY;
+        transient_error = isTransient(errno);
     }
 
     return success;
@@ -1288,7 +1316,7 @@ bool PosixFileSystemAccess::expanselocalpath(const LocalPath& source, LocalPath&
     if (!source.isAbsolute())
     {
         // Sanity.
-        assert(source.localpath[0] != '/');
+        assert(source.toPath(false)[0] != '/');
 
         // Retrieve current working directory.
         if (!cwd(destination))
@@ -1302,18 +1330,18 @@ bool PosixFileSystemAccess::expanselocalpath(const LocalPath& source, LocalPath&
 
     // Sanity.
     assert(destination.isAbsolute());
-    assert(destination.localpath[0] == '/');
+    assert(destination.toPath(false)[0] == '/');
 
     // Canonicalize the path.
     char buffer[PATH_MAX];
 
-    if (!realpath(destination.localpath.c_str(), buffer))
+    if (!realpath(destination.toPath(false).c_str(), buffer))
     {
         destination = source;
         return false;
     }
 
-    destination.localpath.assign(buffer);
+    destination = LocalPath::fromAbsolutePath(buffer);
 
     return true;
 }
@@ -1621,7 +1649,7 @@ void PosixFileSystemAccess::statsid(string *id) const
 
     if (len > 0)
     {
-        id->append(buff, len);
+        id->append(buff, static_cast<size_t>(len));
     }
 #endif
 }
@@ -1630,11 +1658,11 @@ void PosixFileSystemAccess::statsid(string *id) const
 #if defined(__linux__)
 
 LinuxDirNotify::LinuxDirNotify(LinuxFileSystemAccess& owner,
-    LocalNode& root,
-    const LocalPath& rootPath)
-    : DirNotify(rootPath)
-    , mOwner(owner)
-    , mNotifiersIt(owner.mNotifiers.insert(owner.mNotifiers.end(), this))
+                               LocalNode& /*root*/,
+                               const LocalPath& rootPath):
+    DirNotify(rootPath),
+    mOwner(owner),
+    mNotifiersIt(owner.mNotifiers.insert(owner.mNotifiers.end(), this))
 {
     // Assume our owner couldn't initialize.
     setFailed(-owner.mNotifyFd, "Unable to create filesystem monitor.");
@@ -1666,16 +1694,10 @@ AddWatchResult LinuxDirNotify::addWatch(LocalNode& node,
 
     auto handle =
         inotify_add_watch(mOwner.mNotifyFd,
-            path.localpath.c_str(),
-            IN_ATTRIB
-            | IN_CLOSE_WRITE
-            | IN_CREATE
-            | IN_DELETE
-            | IN_DELETE_SELF
-            | IN_EXCL_UNLINK
-            | IN_MOVED_FROM // event->cookie set as IN_MOVED_TO
-            | IN_MOVED_TO
-            | IN_ONLYDIR);
+                          path.toPath(false).c_str(),
+                          IN_ATTRIB | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_DELETE_SELF |
+                              IN_EXCL_UNLINK | IN_MOVED_FROM // event->cookie set as IN_MOVED_TO
+                              | IN_MOVED_TO | IN_ONLYDIR);
 
     if (handle >= 0)
     {
@@ -1688,11 +1710,8 @@ AddWatchResult LinuxDirNotify::addWatch(LocalNode& node,
     }
 
     LOG_warn << "Unable to monitor path for filesystem notifications: "
-        << path.localpath.c_str()
-        << ": Descriptor: "
-        << mOwner.mNotifyFd
-        << ": Error: "
-        << errno;
+             << path.toPath(false).c_str() << ": Descriptor: " << mOwner.mNotifyFd
+             << ": Error: " << errno;
 
     if (errno == ENOMEM || errno == ENOSPC)
         return make_pair(watches.end(), WR_FATAL);
@@ -1852,7 +1871,7 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
 
     // Try and get information about the scan target.
     bool scanTarget_followSymLink = true; // Follow symlink for the parent directory, so we retrieve the stats of the path that the symlinks points to
-    if (!stat(targetPath.localpath.c_str(), metadata, &scanTarget_followSymLink))
+    if (!stat(targetPath.toPath(false).c_str(), metadata, &scanTarget_followSymLink))
     {
         LOG_warn << "Failed to directoryScan: "
                  << "Unable to stat(...) scan target: "
@@ -1886,7 +1905,7 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
     }
 
     // Try and open the directory for iteration.
-    auto directory = opendir(targetPath.localpath.c_str());
+    auto directory = opendir(targetPath.toPath(false).c_str());
 
     if (!directory)
     {
@@ -1922,18 +1941,15 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
         result.localname = LocalPath::fromPlatformEncodedRelative(entry->d_name);
 
         // Compute this entry's absolute name.
-        auto restorer = makeScopedSizeRestorer(path);
+        LocalPath newpath{path};
 
-        path.appendWithSeparator(result.localname, false);
+        newpath.appendWithSeparator(result.localname, false);
 
         // Try and get information about this entry.
-        if (!stat(path.localpath.c_str(), metadata))
+        if (!stat(newpath.toPath(false).c_str(), metadata))
         {
             LOG_warn << "directoryScan: "
-                     << "Unable to stat(...) file: "
-                     << path
-                     << ". Error code was: "
-                     << errno;
+                     << "Unable to stat(...) file: " << newpath << ". Error code was: " << errno;
 
             // Entry's unknown if we can't determine otherwise.
             result.type = TYPE_UNKNOWN;
@@ -1960,16 +1976,11 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
 
                 // Leave a trail for debuggers.
                 LOG_warn << "directoryScan: "
-                         << "Encountered a nested mount: "
-                         << path
-                         << ". Expected device "
-                         << major(device)
-                         << ":"
-                         << minor(device)
-                         << ", got device "
-                         << major(metadata.st_dev)
-                         << ":"
-                         << minor(metadata.st_dev);
+                         << "Encountered a nested mount: " << newpath << ". Expected device "
+                         << major(static_cast<unsigned>(device)) << ":"
+                         << minor(static_cast<unsigned>(device)) << ", got device "
+                         << major(static_cast<unsigned>(metadata.st_dev)) << ":"
+                         << minor(static_cast<unsigned>(metadata.st_dev));
             }
 
             continue;
@@ -1981,10 +1992,8 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
         if (!S_ISREG(metadata.st_mode))
         {
             LOG_warn << "directoryScan: "
-                     << "Encountered a special file: "
-                     << path
-                     << ". Mode flags were: "
-                     << (metadata.st_mode & S_IFMT);
+                     << "Encountered a special file: " << newpath
+                     << ". Mode flags were: " << (metadata.st_mode & S_IFMT);
 
             result.isSymlink = S_ISLNK(metadata.st_mode);
             result.type = result.isSymlink ? TYPE_SYMLINK: TYPE_SPECIAL;
@@ -2012,8 +2021,7 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
         if (result.isBlocked)
         {
             LOG_warn << "directoryScan: "
-                     << "Finder has marked this file as busy: "
-                     << path;
+                     << "Finder has marked this file as busy: " << newpath;
             continue;
         }
 #endif // __MACH__
@@ -2029,17 +2037,14 @@ ScanResult PosixFileSystemAccess::directoryScan(const LocalPath& targetPath,
         }
 
         // Try and open the file for reading.
-        UnixStreamAccess isAccess(path.localpath.c_str(),
-                                  result.fingerprint.size);
+        UnixStreamAccess isAccess(newpath.toPath(false).c_str(), result.fingerprint.size);
 
         // Only fingerprint the file if we could actually open it.
         if (!isAccess)
         {
             LOG_warn << "directoryScan: "
-                     << "Unable to open file for fingerprinting: "
-                     << path
-                     << ". Error was: "
-                     << errno;
+                     << "Unable to open file for fingerprinting: " << newpath
+                     << ". Error was: " << errno;
             continue;
         }
 
@@ -2180,7 +2185,7 @@ static std::string deviceOf(const std::string& database,
                  << device
                  << ". Error was: "
                  << std::strerror(error);
-                 
+
         return std::string();
     }
 
@@ -2333,14 +2338,14 @@ static std::string uuidOf(const std::string& device)
 fsfp_t FileSystemAccess::fsFingerprint(const LocalPath& path) const
 {
     // Try and compute legacy filesystem fingerprint.
-    auto fingerprint = fingerprintOf(path.localpath);
+    auto fingerprint = fingerprintOf(path.toPath(false));
 
     // Couldn't compute legacy fingerprint.
     if (!fingerprint)
         return fsfp_t();
 
     // What device contains the specified path?
-    auto device = deviceOf(path.localpath);
+    auto device = deviceOf(path.toPath(false));
 
     // We know what device contains path.
     if (!device.empty())
@@ -2352,9 +2357,6 @@ fsfp_t FileSystemAccess::fsFingerprint(const LocalPath& path) const
         if (!uuid.empty())
             return fsfp_t(fingerprint, std::move(uuid));
     }
-
-    LOG_warn << "Falling back to legacy filesystem fingerprint: "
-             << path;
 
     // Couldn't determine filesystem UUID.
     return fsfp_t(fingerprint, std::string());
@@ -2406,12 +2408,36 @@ bool PosixFileSystemAccess::hardLink(const LocalPath& source, const LocalPath& t
 
 std::unique_ptr<FileAccess> PosixFileSystemAccess::newfileaccess(bool followSymLinks)
 {
+#ifndef __ANDROID__
     return std::unique_ptr<FileAccess>{new PosixFileAccess{waiter, defaultfilepermissions, followSymLinks}};
+#else
+    if (fileWrapper != nullptr)
+    {
+        return std::unique_ptr<FileAccess>{
+            new AndroidFileAccess{waiter, defaultfilepermissions, followSymLinks}};
+    }
+    else
+    {
+        return std::unique_ptr<FileAccess>{
+            new PosixFileAccess{waiter, defaultfilepermissions, followSymLinks}};
+    }
+#endif
 }
 
 unique_ptr<DirAccess>  PosixFileSystemAccess::newdiraccess()
 {
+#ifndef __ANDROID__
     return unique_ptr<DirAccess>(new PosixDirAccess());
+#else
+    if (fileWrapper != nullptr)
+    {
+        return unique_ptr<DirAccess>(new AndroidDirAccess());
+    }
+    else
+    {
+        return unique_ptr<DirAccess>(new PosixDirAccess());
+    }
+#endif
 }
 
 #ifdef __linux__
@@ -2444,7 +2470,7 @@ bool PosixFileSystemAccess::getlocalfstype(const LocalPath& path, FileSystemType
 #if defined(__linux__) || defined(__ANDROID__)
     struct statfs statbuf;
 
-    if (!statfs(path.localpath.c_str(), &statbuf))
+    if (!statfs(path.toPath(false).c_str(), &statbuf))
     {
         switch (static_cast<unsigned long>(statbuf.f_type))
         {
@@ -2513,7 +2539,7 @@ bool PosixFileSystemAccess::getlocalfstype(const LocalPath& path, FileSystemType
 
     struct statfs statbuf;
 
-    if (!statfs(path.localpath.c_str(), &statbuf))
+    if (!statfs(path.toPath(false).c_str(), &statbuf))
     {
         auto it = filesystemTypes.find(statbuf.f_fstypename);
 
@@ -2595,13 +2621,13 @@ bool PosixDirAccess::dnext(LocalPath& path, LocalPath& name, bool followsymlinks
 
     while ((d = readdir(dp)))
     {
-        auto restorer = makeScopedSizeRestorer(path);
+        LocalPath newpath{path};
 
         if (*d->d_name != '.' || (d->d_name[1] && (d->d_name[1] != '.' || d->d_name[2])))
         {
-            path.appendWithSeparator(LocalPath::fromPlatformEncodedRelative(d->d_name), true);
+            newpath.appendWithSeparator(LocalPath::fromPlatformEncodedRelative(d->d_name), true);
 
-            AdjustBasePathResult pathStr = adjustBasePath(path);
+            AdjustBasePathResult pathStr = adjustBasePath(newpath);
 
             bool statOk = !lstat(pathStr.c_str(), &statbuf);
             if (followsymlinks && statOk && S_ISLNK(statbuf.st_mode))

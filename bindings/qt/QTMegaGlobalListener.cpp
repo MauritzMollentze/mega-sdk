@@ -50,12 +50,6 @@ void QTMegaGlobalListener::onAccountUpdate(MegaApi *api)
     QCoreApplication::postEvent(this, event, INT_MIN);
 }
 
-void QTMegaGlobalListener::onReloadNeeded(MegaApi *api)
-{
-    QTMegaEvent *event = new QTMegaEvent(api, (QEvent::Type)QTMegaEvent::OnReloadNeeded);
-    QCoreApplication::postEvent(this, event, INT_MIN);
-}
-
 void QTMegaGlobalListener::onEvent(MegaApi *api, MegaEvent *e)
 {
     QTMegaEvent *event = new QTMegaEvent(api, (QEvent::Type)QTMegaEvent::OnEvent);
@@ -63,11 +57,13 @@ void QTMegaGlobalListener::onEvent(MegaApi *api, MegaEvent *e)
     QCoreApplication::postEvent(this, event, INT_MIN);
 }
 
+#ifdef ENABLE_SYNC
 void QTMegaGlobalListener::onGlobalSyncStateChanged(MegaApi *api)
 {
     QTMegaEvent *event = new QTMegaEvent(api, (QEvent::Type)QTMegaEvent::OnGlobalSyncStateChanged);
     QCoreApplication::postEvent(this, event, INT_MIN);
 }
+#endif
 
 void QTMegaGlobalListener::customEvent(QEvent *e)
 {
@@ -86,15 +82,14 @@ void QTMegaGlobalListener::customEvent(QEvent *e)
         case QTMegaEvent::OnAccountUpdate:
             if(listener) listener->onAccountUpdate(event->getMegaApi());
             break;
-        case QTMegaEvent::OnReloadNeeded:
-            if(listener) listener->onReloadNeeded(event->getMegaApi());
-            break;
         case QTMegaEvent::OnEvent:
             if(listener) listener->onEvent(event->getMegaApi(), event->getEvent());
             break;
+#ifdef ENABLE_SYNC
         case QTMegaEvent::OnGlobalSyncStateChanged:
             if(listener) listener->onGlobalSyncStateChanged(event->getMegaApi());
             break;
+#endif
         default:
             break;
     }

@@ -1,11 +1,12 @@
 #include <cassert>
 #include <cstring>
 
+#include <mega/common/normalized_path.h>
 #include <mega/fuse/common/logging.h>
 #include <mega/fuse/platform/constants.h>
 #include <mega/fuse/platform/dispatcher.h>
-#include <mega/fuse/platform/mount_db.h>
 #include <mega/fuse/platform/mount.h>
+#include <mega/fuse/platform/mount_db.h>
 #include <mega/fuse/platform/service_context.h>
 #include <mega/fuse/platform/utility.h>
 
@@ -15,6 +16,8 @@ namespace fuse
 {
 namespace platform
 {
+
+using namespace common;
 
 static Dispatcher& dispatcher(FSP_FILE_SYSTEM& filesystem);
 
@@ -153,7 +156,7 @@ NTSTATUS Dispatcher::create(FSP_FILE_SYSTEM* filesystem,
                             UINT32 options,
                             UINT32 access,
                             UINT32 attributes,
-                            PSECURITY_DESCRIPTOR descriptor,
+                            [[maybe_unused]] PSECURITY_DESCRIPTOR descriptor,
                             UINT64,
                             PVOID* context,
                             FSP_FSCTL_FILE_INFO* info)
@@ -596,9 +599,11 @@ NTSTATUS Dispatcher::write(FSP_FILE_SYSTEM* filesystem,
     return result;
 }
 
-Dispatcher::Dispatcher(Mount& mount)
+Dispatcher::Dispatcher(Mount& mount,
+                       const NormalizedPath& path)
   : mFilesystem(nullptr)
   , mMount(mount)
+  , mPath()
 {
     FSP_FSCTL_VOLUME_PARAMS parameters;
 
@@ -622,7 +627,7 @@ Dispatcher::Dispatcher(Mount& mount)
     std::wstring type = L"" FSP_FSCTL_DISK_DEVICE_NAME;
 
     // Actually mounting as a "network" filesystem.
-    if (mount.path().isRootPath())
+    if (path.empty() || path.isRootPath())
     {
         // Compute UNC prefix.
         auto prefix = UNCPrefix + toWideString(mount.name());
@@ -660,16 +665,19 @@ Dispatcher::Dispatcher(Mount& mount)
     // Make sure we know which dispatcher is processing what requests.
     mFilesystem->UserContext = this;
 
-    FUSEDebugF("Dispatcher constructed: %s",
-               mMount.path().toPath(false).c_str());
+    FUSEDebugF("Dispatcher constructed: %s", mMount.name().c_str());
 }
 
 Dispatcher::~Dispatcher()
 {
     FspFileSystemDelete(mFilesystem);
 
-    FUSEDebugF("Dispatcher destructed: %s",
-               mMount.path().toPath(false).c_str());
+    FUSEDebugF("Dispatcher destructed: %s", mMount.name().c_str());
+}
+
+const NormalizedPath& Dispatcher::path() const
+{
+    return mPath;
 }
 
 void Dispatcher::reply(FSP_FSCTL_TRANSACT_RSP& response, Error result)
@@ -693,7 +701,7 @@ FSP_FSCTL_TRANSACT_REQ& Dispatcher::request() const
     return *context->Request;
 }
 
-void Dispatcher::start()
+void Dispatcher::start(const NormalizedPath& path)
 {
     // Try and start the dispatcher.
     auto result = FspFileSystemStartDispatcher(mFilesystem, 0);
@@ -701,10 +709,8 @@ void Dispatcher::start()
     // Couldn't start the dispatcher.
     if (!NT_SUCCESS(result))
         throw FUSEErrorF("Couldn't start dispatcher: %s: %lx",
-                         mMount.path().toPath(false).c_str(),
+                         mMount.name().c_str(),
                          result);
-
-    auto path = mMount.path().asPlatformEncoded(true);
 
     // Assume the mount's writable.
     auto* descriptor = &mMount.mMountDB.mReadWriteSecurityDescriptor;
@@ -713,16 +719,25 @@ void Dispatcher::start()
     if (!mMount.writable())
         descriptor = &mMount.mMountDB.mReadOnlySecurityDescriptor;
 
+    // Assume the user wants us to allocate a drive letter.
+    auto path_ = path.asPlatformEncoded(true);
+
     // Try and make the mount visible on the local filesystem.
     result = FspFileSystemSetMountPointEx(mFilesystem,
-                                          &path[0],
+                                          path_.empty() ? nullptr : path_.data(),
                                           descriptor->get());
 
     // Couldn't make the mount visible.
     if (!NT_SUCCESS(result))
         throw FUSEErrorF("Couldn't set volume mount point: %s: %lx",
-                         mMount.path().toPath(false).c_str(),
+                         mMount.name().c_str(),
                          result);
+
+    // Latch the mount's actual path.
+    mPath = [this]() {
+        std::wstring path = FspFileSystemMountPoint(mFilesystem);
+        return LocalPath::fromPlatformEncodedAbsolute(std::move(path));
+    }();
 }
 
 void Dispatcher::stop()

@@ -23,6 +23,8 @@
 #define MEGAUSERNOTIFICATIONS_H 1
 
 #include "json.h"
+#include "name_id.h"
+#include "setandelement.h"
 #include "utils.h"
 
 #include <bitset>
@@ -68,24 +70,6 @@ struct UserAlertPendingContact
 
 namespace UserAlert
 {
-    static const nameid type_ipc = MAKENAMEID3('i', 'p', 'c');                      // incoming pending contact
-    static const nameid type_c = 'c';                                               // contact change
-    static const nameid type_upci = MAKENAMEID4('u', 'p', 'c', 'i');                // updating pending contact incoming
-    static const nameid type_upco = MAKENAMEID4('u', 'p', 'c', 'o');                // updating pending contact outgoing
-    static const nameid type_share = MAKENAMEID5('s', 'h', 'a', 'r', 'e');          // new share
-    static const nameid type_dshare = MAKENAMEID6('d', 's', 'h', 'a', 'r', 'e');    // deleted share
-    static const nameid type_put = MAKENAMEID3('p', 'u', 't');                      // new shared nodes
-    static const nameid type_d = 'd';                                               // removed shared node
-    static const nameid type_u = 'u';                                               // updated shared node
-    static const nameid type_psts = MAKENAMEID4('p', 's', 't', 's');                // payment
-    static const nameid type_psts_v2 = MAKENAMEID7('p', 's', 't', 's', '_', 'v', '2'); // payment v2 (VPN)
-    static const nameid type_pses = MAKENAMEID4('p', 's', 'e', 's');                // payment reminder
-    static const nameid type_ph = MAKENAMEID2('p', 'h');                            // takedown
-#ifdef ENABLE_CHAT
-    static const nameid type_nusm = MAKENAMEID5('m', 'c', 's', 'm', 'p');           // new or updated scheduled meeting
-    static const nameid type_dsm = MAKENAMEID5('m', 'c', 's', 'm', 'r');            // deleted scheduled meeting
-#endif
-
     enum userAlertsSubtype
     {
         subtype_invalid   = 0,
@@ -319,6 +303,26 @@ namespace UserAlert
         static Takedown* unserialize(string*, unsigned id);
     };
 
+    struct SetTakedown: public Base
+    {
+        bool isTakedown;
+        bool isReinstate;
+        PublicLinkSet::LinkDeletionReason reason;
+        handle setId;
+
+        SetTakedown(UserAlertRaw& un, unsigned int id);
+        SetTakedown(bool down,
+                    bool reinstate,
+                    PublicLinkSet::LinkDeletionReason downReason,
+                    handle sId,
+                    m_time_t timestamp,
+                    unsigned int id);
+        virtual void text(string& header, string& title, MegaClient* mc) override;
+
+        bool serialize(string*) const override;
+        static SetTakedown* unserialize(string*, unsigned id);
+    };
+
 #ifdef ENABLE_CHAT
     struct NewScheduledMeeting : public Base
     {
@@ -328,13 +332,20 @@ namespace UserAlert
         m_time_t mStartDateTime = mega_invalid_timestamp; // overrides param
 
         NewScheduledMeeting(UserAlertRaw& un, unsigned int id);
-        NewScheduledMeeting(handle _ou, m_time_t _ts, unsigned int _id, handle _chatid, handle _sm, handle _parentSchedId, m_time_t _startDateTime)
-            : Base(UserAlert::type_nusm, _ou, string(), _ts, _id)
-            , mChatid(_chatid)
-            , mSchedMeetingHandle(_sm)
-            , mParentSchedId(_parentSchedId)
-            , mStartDateTime(_startDateTime)
-            {}
+
+        NewScheduledMeeting(handle _ou,
+                            m_time_t _ts,
+                            unsigned int _id,
+                            handle _chatid,
+                            handle _sm,
+                            handle _parentSchedId,
+                            m_time_t _startDateTime):
+            Base(name_id::mcsmp, _ou, string(), _ts, _id),
+            mChatid(_chatid),
+            mSchedMeetingHandle(_sm),
+            mParentSchedId(_parentSchedId),
+            mStartDateTime(_startDateTime)
+        {}
 
         virtual void text(string& header, string& title, MegaClient* mc) override;
         bool serialize(string* d) const override;
@@ -440,14 +451,22 @@ namespace UserAlert
         Changeset mUpdatedChangeset;
 
         UpdatedScheduledMeeting(UserAlertRaw& un, unsigned int id);
-        UpdatedScheduledMeeting(handle _ou, m_time_t _ts, unsigned int _id, handle _chatid, handle _sm, handle _parentSchedId, m_time_t _startDateTime, Changeset&& _cs)
-            : Base(UserAlert::type_nusm, _ou, string(),  _ts, _id)
-            , mChatid(_chatid)
-            , mSchedMeetingHandle(_sm)
-            , mParentSchedId(_parentSchedId)
-            , mStartDateTime(_startDateTime)
-            , mUpdatedChangeset(_cs)
-            {}
+
+        UpdatedScheduledMeeting(handle _ou,
+                                m_time_t _ts,
+                                unsigned int _id,
+                                handle _chatid,
+                                handle _sm,
+                                handle _parentSchedId,
+                                m_time_t _startDateTime,
+                                Changeset&& _cs):
+            Base(name_id::mcsmp, _ou, string(), _ts, _id),
+            mChatid(_chatid),
+            mSchedMeetingHandle(_sm),
+            mParentSchedId(_parentSchedId),
+            mStartDateTime(_startDateTime),
+            mUpdatedChangeset(_cs)
+        {}
 
         virtual void text(string& header, string& title, MegaClient* mc) override;
         bool serialize(string*) const override;
@@ -459,11 +478,16 @@ namespace UserAlert
         handle mChatid = UNDEF;
         handle mSchedMeetingHandle = UNDEF;
         DeletedScheduledMeeting(UserAlertRaw& un, unsigned int id);
-        DeletedScheduledMeeting(handle _ou, m_time_t _ts, unsigned int _id, handle _chatid, handle _sm)
-            : Base(UserAlert::type_dsm, _ou, string(), _ts, _id)
-            , mChatid(_chatid)
-            , mSchedMeetingHandle(_sm)
-            {}
+
+        DeletedScheduledMeeting(handle _ou,
+                                m_time_t _ts,
+                                unsigned int _id,
+                                handle _chatid,
+                                handle _sm):
+            Base(name_id::mcsmr, _ou, string(), _ts, _id),
+            mChatid(_chatid),
+            mSchedMeetingHandle(_sm)
+        {}
 
         virtual void text(string& header, string& title, MegaClient* mc) override;
         bool serialize(string* d) const override;
@@ -585,7 +609,11 @@ public:
 
     // keep track of incoming nodes in shares, and convert to a notification
     void beginNotingSharedNodes();
-    void noteSharedNode(handle user, int type, m_time_t timestamp, Node* n, nameid alertType = UserAlert::type_d);
+    void noteSharedNode(handle user,
+                        int type,
+                        m_time_t timestamp,
+                        Node* n,
+                        nameid alertType = name_id::d);
     void convertNotedSharedNodes(bool added, handle originatingUser);
     void ignoreNextSharedNodesUnder(handle h);
 

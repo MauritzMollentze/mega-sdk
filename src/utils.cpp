@@ -27,6 +27,7 @@
 #include "mega/mega_utf8proc.h"
 #include "mega/megaclient.h"
 #include "mega/serialize64.h"
+#include "mega/testhooks.h"
 
 #include <cctype>
 #include <iomanip>
@@ -87,6 +88,20 @@ string toHandle(handle h)
     char base64Handle[14];
     Base64::btoa((byte*)&(h), sizeof h, base64Handle);
     return string(base64Handle);
+}
+
+handle stringToHandle(const std::string& b64String, const int handleSize)
+{
+    if (b64String.empty())
+        return UNDEF;
+
+    std::string binary;
+    if (Base64::atob(b64String, binary) != handleSize)
+    {
+        assert(false);
+        return UNDEF;
+    }
+    return *reinterpret_cast<handle*>(binary.data());
 }
 
 std::pair<bool, TypeOfLink> toTypeOfLink(nodetype_t type)
@@ -164,21 +179,23 @@ string backupTypeToStr(BackupType type)
     return "UNKNOWN";
 }
 
-void AddHiddenFileAttribute(mega::LocalPath& path)
+void AddHiddenFileAttribute([[maybe_unused]] mega::LocalPath& path)
 {
 #ifdef _WIN32
+    auto pathStr{path.asPlatformEncoded(false)};
     WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (GetFileAttributesExW(path.localpath.data(), GetFileExInfoStandard, &fad))
-        SetFileAttributesW(path.localpath.data(), fad.dwFileAttributes | FILE_ATTRIBUTE_HIDDEN);
+    if (GetFileAttributesExW(pathStr.data(), GetFileExInfoStandard, &fad))
+        SetFileAttributesW(pathStr.data(), fad.dwFileAttributes | FILE_ATTRIBUTE_HIDDEN);
 #endif
 }
 
-void RemoveHiddenFileAttribute(mega::LocalPath& path)
+void RemoveHiddenFileAttribute([[maybe_unused]] mega::LocalPath& path)
 {
 #ifdef _WIN32
+    auto pathStr{path.asPlatformEncoded(false)};
     WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (GetFileAttributesExW(path.localpath.data(), GetFileExInfoStandard, &fad))
-        SetFileAttributesW(path.localpath.data(), fad.dwFileAttributes & ~FILE_ATTRIBUTE_HIDDEN);
+    if (GetFileAttributesExW(pathStr.data(), GetFileExInfoStandard, &fad))
+        SetFileAttributesW(pathStr.data(), fad.dwFileAttributes & ~FILE_ATTRIBUTE_HIDDEN);
 #endif
 }
 
@@ -212,6 +229,13 @@ void CacheableWriter::serializepstr(const string* field)
     if (field) dest.append(field->data(), ll);
 }
 
+void CacheableWriter::serializestring(const std::wstring& field)
+{
+    const unsigned short ll = static_cast<unsigned short>(field.size() * sizeof(wchar_t));
+    dest.append(reinterpret_cast<const char*>(&ll), sizeof(ll));
+    dest.append(reinterpret_cast<const char*>(field.data()), ll);
+}
+
 void CacheableWriter::serializestring(const string& field)
 {
     unsigned short ll = (unsigned short)field.size();
@@ -229,7 +253,7 @@ void CacheableWriter::serializestring_u32(const string& field)
 void CacheableWriter::serializecompressedu64(uint64_t field)
 {
     byte buf[sizeof field+1];
-    dest.append((const char*)buf, Serialize64::serialize(buf, field));
+    dest.append((const char*)buf, static_cast<size_t>(Serialize64::serialize(buf, field)));
 }
 
 void CacheableWriter::serializei8(int8_t field)
@@ -321,7 +345,7 @@ CacheableReader::CacheableReader(const string& d)
 void CacheableReader::eraseused(string& d)
 {
     assert(end == d.data() + d.size());
-    d.erase(0, ptr - d.data());
+    d.erase(0, static_cast<size_t>(ptr - d.data()));
 }
 
 bool CacheableReader::unserializecstr(string& s, bool removeNull)
@@ -348,6 +372,36 @@ bool CacheableReader::unserializecstr(string& s, bool removeNull)
     return true;
 }
 
+bool CacheableReader::unserializestring(std::wstring& s)
+{
+    if (ptr + sizeof(unsigned short) > end)
+    {
+        return false;
+    }
+
+    const unsigned short len_bytes = MemAccess::get<unsigned short>(ptr);
+    ptr += sizeof(len_bytes);
+
+    if (ptr + len_bytes > end)
+    {
+        return false;
+    }
+
+    if (len_bytes)
+    {
+        if (len_bytes % sizeof(wchar_t) != 0)
+        {
+            return false;
+        }
+
+        size_t wchar_count = len_bytes / sizeof(wchar_t);
+        s.assign(reinterpret_cast<const wchar_t*>(ptr), wchar_count);
+    }
+
+    ptr += len_bytes;
+    fieldnum += 1;
+    return true;
+}
 
 bool CacheableReader::unserializestring(string& s)
 {
@@ -489,8 +543,7 @@ void chunkmac_map::calcprogress(m_off_t size, m_off_t& chunkpos, m_off_t& progre
             }
         }
     }
-
-    progresscontiguous = chunkpos;
+    setProgressContiguous(chunkpos);
 }
 
 m_off_t chunkmac_map::nextUnprocessedPosFrom(m_off_t pos)
@@ -566,7 +619,13 @@ void chunkmac_map::ctr_encrypt(m_off_t chunkid, SymmCipher *cipher, byte *chunks
 
     // encrypt is always done on whole chunks
     auto& chunk = mMacMap[chunkid];
-    cipher->ctr_crypt(chunkstart, unsigned(chunksize), startpos, ctriv, chunk.mac, true, true);
+    cipher->ctr_crypt(chunkstart,
+                      unsigned(chunksize),
+                      startpos,
+                      static_cast<uint64_t>(ctriv),
+                      chunk.mac,
+                      true,
+                      true);
     chunk.offset = 0;
     chunk.finished = finishesChunk;  // when encrypting for uploads, only set finished after confirmation of the chunk uploading.
 }
@@ -579,7 +638,13 @@ void chunkmac_map::ctr_decrypt(m_off_t chunkid, SymmCipher *cipher, byte *chunks
     assert(startpos + chunksize <= ChunkedHash::chunkceil(chunkid));
     ChunkMAC& chunk = mMacMap[chunkid];
 
-    cipher->ctr_crypt(chunkstart, chunksize, startpos, ctriv, chunk.mac, false, chunk.notStarted());
+    cipher->ctr_crypt(chunkstart,
+                      chunksize,
+                      startpos,
+                      static_cast<uint64_t>(ctriv),
+                      chunk.mac,
+                      false,
+                      chunk.notStarted());
 
     if (finishesChunk)
     {
@@ -592,6 +657,20 @@ void chunkmac_map::ctr_decrypt(m_off_t chunkid, SymmCipher *cipher, byte *chunks
         chunk.finished = false;
         chunk.offset += chunksize;
     }
+}
+
+void chunkmac_map::setProgressContiguous(const m_off_t p)
+{
+    progresscontiguous = p;
+    DEBUG_TEST_HOOK_ON_PROGRESS_CONTIGUOUS_UPDATE(progresscontiguous);
+}
+
+void chunkmac_map::swap(chunkmac_map& other)
+{
+    mMacMap.swap(other.mMacMap);
+    std::swap(macsmacSoFarPos, other.macsmacSoFarPos);
+    std::swap(progresscontiguous, other.progresscontiguous);
+    DEBUG_TEST_HOOK_ON_PROGRESS_CONTIGUOUS_UPDATE(progresscontiguous);
 }
 
 void chunkmac_map::finishedUploadChunks(chunkmac_map& macs)
@@ -622,7 +701,8 @@ m_off_t chunkmac_map::updateContiguousProgress(m_off_t fileSize)
 
     while (finishedAt(progresscontiguous))
     {
-        progresscontiguous = ChunkedHash::chunkceil(progresscontiguous, fileSize);
+        const auto p = ChunkedHash::chunkceil(progresscontiguous, fileSize);
+        setProgressContiguous(p);
     }
     return progresscontiguous;
 }
@@ -678,6 +758,50 @@ void chunkmac_map::copyEntriesTo(chunkmac_map& other)
         assert(e.first > macsmacSoFarPos);
         other.mMacMap[e.first] = e.second;
     }
+}
+
+m_off_t chunkmac_map::copyEntriesToUntilRaidlineBeforePos(m_off_t maxPos, chunkmac_map& other)
+{
+    static constexpr auto logPre = "[chunkmac_map::copyEntriesToUntilRaidlineBeforePos] ";
+
+    maxPos = ChunkedHash::chunkfloor(maxPos);
+    while (maxPos > 0 && (maxPos % RAIDLINE != 0))
+    {
+        LOG_debug << logPre << "Wrong maxPos not padded to RAIDLINE: maxPos = " << maxPos
+                  << ", RAIDLINE = " << RAIDLINE << ", mod = " << (maxPos % RAIDLINE);
+        maxPos -= (maxPos % RAIDLINE);
+        maxPos = ChunkedHash::chunkfloor(maxPos);
+        if (maxPos % RAIDLINE != 0)
+        {
+            LOG_debug << logPre << "maxPos still not padded to RAIDLINE: pos = " << maxPos
+                      << ", RAIDLINE = " << RAIDLINE << ", mod = " << (maxPos % RAIDLINE);
+        }
+    }
+
+    LOG_debug << logPre << "Final maxPos = " << maxPos;
+
+    if (maxPos == 0)
+        return 0;
+
+    for (auto& e: mMacMap)
+    {
+        if (e.first >= maxPos)
+        {
+            LOG_debug << logPre << "chunk (" << e.first << ") exceeding maxPos (maxPos = " << maxPos
+                      << "), break";
+            break;
+        }
+        if (!e.second.finished)
+        {
+            LOG_debug << logPre << "chunk (" << e.first
+                      << ") not finished (offset = " << e.second.offset << ") (maxPos = " << maxPos
+                      << "), break";
+            break;
+        }
+        other.mMacMap[e.first] = e.second;
+    }
+
+    return maxPos;
 }
 
 void chunkmac_map::copyEntryTo(m_off_t pos, chunkmac_map& other)
@@ -952,7 +1076,7 @@ bool CacheableReader::unserializeexpansionflags(unsigned char field[8], unsigned
     }
     memcpy(field, ptr, 8);
 
-    for (int i = usedFlagCount;  i < 8; i++ )
+    for (unsigned i = usedFlagCount; i < 8; i++)
     {
         if (field[i])
         {
@@ -1019,7 +1143,8 @@ bool PaddedCBC::encrypt(PrnGen &rng, string* data, SymmCipher* key, string* iv)
 
     // Pad to block size and encrypt.
     data->append("E");
-    data->resize((data->size() + key->BLOCKSIZE - 1) & - key->BLOCKSIZE, 'P');
+    data->resize((data->size() + key->BLOCKSIZE - 1) & ~(static_cast<size_t>(key->BLOCKSIZE) - 1),
+                 'P');
     byte* dd = reinterpret_cast<byte*>(const_cast<char*>(data->data())); // make sure it works for pre-C++17 compilers
     bool encrypted = iv ?
         key->cbc_encrypt(dd, data->size(), reinterpret_cast<const byte*>(iv->data())) :
@@ -1167,7 +1292,8 @@ bool HashSignature::checksignature(AsymmCipher* pubk, const byte* sig, unsigned 
 
     s.resize(h.size());
 
-    if (!(size = pubk->rawencrypt(sig, len, (byte*)s.data(), s.size())))
+    size = pubk->rawencrypt(sig, len, (byte*)s.data(), s.size());
+    if (!size)
     {
         return 0;
     }
@@ -1245,8 +1371,8 @@ bool PayCrypter::rsaEncryptKeys(const string *cleartext, const byte *pubkdata, i
 
     //Prepare the message to encrypt (2-byte header + clear text)
     string keyString;
-    keyString.append(1, (byte)(cleartext->size() >> 8));
-    keyString.append(1, (byte)(cleartext->size()));
+    keyString.append(1, static_cast<char>(cleartext->size() >> 8));
+    keyString.append(1, static_cast<char>(cleartext->size()));
     keyString.append(*cleartext);
 
     //Save the length of the valid message
@@ -1262,13 +1388,13 @@ bool PayCrypter::rsaEncryptKeys(const string *cleartext, const byte *pubkdata, i
     }
 
     //RSA encryption
-    result->resize(pubkdatalen);
+    result->resize(static_cast<size_t>(pubkdatalen));
     result->resize(asym.rawencrypt((byte *)keyString.data(), keyString.size(), (byte *)result->data(), result->size()));
 
     //Complete the result (2-byte header + RSA result)
     size_t reslen = result->size();
-    result->insert(0, 1, (byte)(reslen >> 8));
-    result->insert(1, 1, (byte)(reslen));
+    result->insert(0, 1, static_cast<char>(reslen >> 8));
+    result->insert(1, 1, static_cast<char>(reslen));
     return true;
 }
 
@@ -1292,339 +1418,6 @@ bool PayCrypter::hybridEncrypt(const string *cleartext, const byte *pubkdata, in
     //Complete the result
     *result = rsaKeyCipher + payloadString;
     return true;
-}
-
-string * TLVstore::tlvRecordsToContainer(PrnGen &rng, SymmCipher *key, encryptionsetting_t encSetting)
-{
-    // decide nonce/IV and auth. tag lengths based on the `mode`
-    unsigned ivlen = TLVstore::getIvlen(encSetting);
-    unsigned taglen = TLVstore::getTaglen(encSetting);
-    encryptionmode_t encMode = TLVstore::getMode(encSetting);
-
-    if (!ivlen || !taglen || encMode == AES_MODE_UNKNOWN)
-    {
-        return NULL;
-    }
-
-    // serialize the TLV records
-    std::unique_ptr<string> container(tlvRecordsToContainer());
-
-    // generate IV array
-    std::vector<byte> iv(ivlen);
-    rng.genblock(iv.data(), ivlen);
-
-    string cipherText;
-
-    // encrypt the bytes using the specified mode
-
-    if (encMode == AES_MODE_CCM)   // CCM or GCM_BROKEN (same than CCM)
-    {
-        if (!key->ccm_encrypt(container.get(), iv.data(), ivlen, taglen, &cipherText))
-        {
-            return nullptr;
-        }
-    }
-    else if (encMode == AES_MODE_GCM)   // then use GCM
-    {
-        if (!key->gcm_encrypt(container.get(), iv.data(), ivlen, taglen, &cipherText))
-        {
-            return nullptr;
-        }
-    }
-
-    string *result = new string;
-    result->resize(1);
-    result->at(0) = static_cast<char>(encSetting);
-    result->append((char*) iv.data(), ivlen);
-    result->append((char*) cipherText.data(), cipherText.length()); // includes auth. tag
-
-    return result;
-}
-
-string* TLVstore::tlvRecordsToContainer()
-{
-    string *result = new string;
-    size_t offset = 0;
-    size_t length;
-
-    for (TLV_map::iterator it = tlv.begin(); it != tlv.end(); it++)
-    {
-        // copy Type
-        result->append(it->first);
-        offset += it->first.length() + 1;   // keep the NULL-char for Type string
-
-        // set Length of value
-        length = it->second.length();
-        if (length > 0xFFFF)
-        {
-            assert(it->first == "" && tlv.size() == 1 && "Only records with a single empty key can be larger");
-            LOG_warn << "Overflow of Length for TLV record: " << length;
-            length = 0xFFFF;
-        }
-        result->resize(offset + 2);
-        result->at(offset) = static_cast<char>(length >> 8);
-        result->at(offset + 1) = static_cast<char>(length & 0xFF);
-        offset += 2;
-
-        // copy the Value
-        result->append((char*)it->second.data(), it->second.length());
-        offset += it->second.length();
-    }
-
-    return result;
-}
-
-bool TLVstore::get(string type, string& value) const
-{
-    auto it = tlv.find(type);
-    if (it == tlv.cend())
-        return false;
-
-    value = it->second;
-    return true;
-}
-
-const TLV_map * TLVstore::getMap() const
-{
-    return &tlv;
-}
-
-vector<string> *TLVstore::getKeys() const
-{
-    vector<string> *keys = new vector<string>;
-    for (string_map::const_iterator it = tlv.begin(); it != tlv.end(); it++)
-    {
-        keys->push_back(it->first);
-    }
-    return keys;
-}
-
-void TLVstore::set(string type, string value)
-{
-    tlv[type] = value;
-}
-
-void TLVstore::reset(std::string type)
-{
-    tlv.erase(type);
-}
-
-size_t TLVstore::size()
-{
-    return tlv.size();
-}
-
-unsigned TLVstore::getTaglen(int mode)
-{
-
-    switch (mode)
-    {
-    case AES_CCM_10_16:
-    case AES_CCM_12_16:
-    case AES_GCM_12_16_BROKEN:
-    case AES_GCM_12_16:
-        return 16;
-
-    case AES_CCM_10_08:
-    case AES_GCM_10_08_BROKEN:
-    case AES_GCM_10_08:
-        return 8;
-
-    default:    // unknown block encryption mode
-        return 0;
-    }
-}
-
-unsigned TLVstore::getIvlen(int mode)
-{
-    switch (mode)
-    {
-    case AES_CCM_12_16:
-    case AES_GCM_12_16_BROKEN:
-    case AES_GCM_12_16:
-        return 12;
-
-    case AES_CCM_10_08:
-    case AES_GCM_10_08_BROKEN:
-    case AES_CCM_10_16:
-    case AES_GCM_10_08:
-        return 10;
-
-    default:    // unknown block encryption mode
-        return 0;
-    }
-}
-
-encryptionmode_t TLVstore::getMode(int mode)
-{
-    switch (mode)
-    {
-    case AES_CCM_12_16:
-    case AES_GCM_12_16_BROKEN:
-    case AES_CCM_10_16:
-    case AES_CCM_10_08:
-    case AES_GCM_10_08_BROKEN:
-        return AES_MODE_CCM;
-
-    case AES_GCM_12_16:
-    case AES_GCM_10_08:
-        return AES_MODE_GCM;
-
-    default:    // unknown block encryption mode
-        return AES_MODE_UNKNOWN;
-    }
-}
-
-TLVstore * TLVstore::containerToTLVrecords(const string *data)
-{
-    if (data->empty())
-    {
-        return NULL;
-    }
-
-    TLVstore *tlv = new TLVstore();
-
-    size_t offset = 0;
-
-    string type;
-    size_t typelen;
-    string value;
-    unsigned valuelen;
-    size_t pos;
-
-    size_t datalen = data->length();
-
-    // T is a C-string
-    // L is an unsigned integer encoded in 2 bytes (aka. uint16_t)
-    // V is a binary buffer of "L" bytes
-
-    // if the size of the container is greater than the 65538 (T.1, L.2, V.>65535),
-    // then the container is probably an authring whose value is greater than the
-    // maximum length supported by 2 bytes. Since the T is an empty string for this
-    // type of attributes, we can directly assign the value to the record
-    // note: starting from Nov2022, if the size of the record is too large,
-    // the Length will be truncated to indicate the maximum size 65535 = 0xFFFF
-    size_t maxSize = 1 + 2 + 0xFFFF;
-    if (datalen >= maxSize && !(*data)[0])
-    {
-        tlv->set("", data->substr(3));
-        return tlv;
-    }
-
-    while (offset < datalen)
-    {
-        // get the length of the Type string
-        pos = data->find('\0', offset);
-        typelen = pos - offset;
-
-        // if no valid TLV record in the container, but remaining bytes...
-        if (pos == string::npos || offset + typelen + 3 > datalen)
-        {
-            delete tlv;
-            return NULL;
-        }
-
-        // get the Type string
-        type.assign((char*)&(data->data()[offset]), typelen);
-        offset += typelen + 1;        // +1: NULL character
-
-        // get the Length of the value
-        valuelen = (unsigned char)data->at(offset) << 8
-                 | (unsigned char)data->at(offset + 1);
-        offset += 2;
-
-        // if there's not enough data for value...
-        if (offset + valuelen > datalen)
-        {
-            delete tlv;
-            return NULL;
-        }
-
-        // get the Value
-        value.assign((char*)&(data->data()[offset]), valuelen);  // value may include NULL characters, read as a buffer
-        offset += valuelen;
-
-        // add it to the map
-        tlv->set(type, value);
-    }
-
-    return tlv;
-}
-
-
-TLVstore * TLVstore::containerToTLVrecords(const string *data, SymmCipher *key)
-{
-    if (data->empty())
-    {
-        return NULL;
-    }
-
-    unsigned offset = 0;
-    encryptionsetting_t encSetting = (encryptionsetting_t) data->at(offset);
-    offset++;
-
-    unsigned ivlen = TLVstore::getIvlen(encSetting);
-    unsigned taglen = TLVstore::getTaglen(encSetting);
-    encryptionmode_t encMode = TLVstore::getMode(encSetting);
-
-    if (encMode == AES_MODE_UNKNOWN || !ivlen || !taglen ||  data->size() < offset+ivlen+taglen)
-    {
-        return NULL;
-    }
-
-    byte *iv = new byte[ivlen];
-    memcpy(iv, &(data->data()[offset]), ivlen);
-    offset += ivlen;
-
-    unsigned cipherTextLen = unsigned(data->length() - offset);
-    string cipherText = data->substr(offset, cipherTextLen);
-
-    unsigned clearTextLen = cipherTextLen - taglen;
-    string clearText;
-
-    bool decrypted = false;
-    if (encMode == AES_MODE_CCM)   // CCM or GCM_BROKEN (same than CCM)
-    {
-       decrypted = key->ccm_decrypt(&cipherText, iv, ivlen, taglen, &clearText);
-    }
-    else if (encMode == AES_MODE_GCM)  // GCM
-    {
-       decrypted = key->gcm_decrypt(&cipherText, iv, ivlen, taglen, &clearText);
-    }
-
-    delete [] iv;
-
-    if (!decrypted)  // the decryption has failed (probably due to authentication)
-    {
-        return NULL;
-    }
-    else if (clearText.empty()) // If decryption succeeded but attribute is empty, generate an empty TLV
-    {
-        return new TLVstore();
-    }
-
-    TLVstore *tlv = TLVstore::containerToTLVrecords(&clearText);
-    if (!tlv) // 'data' might be affected by the legacy bug: strings encoded in UTF-8 instead of Unicode
-    {
-        // retry TLV decoding after conversion from 'UTF-8 chars' to 'Unicode chars'
-        LOG_warn << "Retrying TLV records decoding with UTF-8 patch";
-
-        string clearTextUnicode;
-        if (!Utils::utf8toUnicode((const byte*)clearText.data(), clearTextLen, &clearTextUnicode))
-        {
-            LOG_err << "Invalid UTF-8 encoding";
-        }
-        else
-        {
-            tlv = TLVstore::containerToTLVrecords(&clearTextUnicode);
-        }
-    }
-
-    return tlv;
-}
-
-TLVstore::~TLVstore()
-{
 }
 
 size_t Utils::utf8SequenceSize(unsigned char c)
@@ -1663,7 +1456,7 @@ string  Utils::toUpperUtf8(const string& text)
 
         char buff[8];
         auto charLen = utf8proc_encode_char(c, (utf8proc_uint8_t *)buff);
-        result.append(buff, charLen);
+        result.append(buff, static_cast<size_t>(charLen));
     }
 
     return result;
@@ -1691,7 +1484,7 @@ string  Utils::toLowerUtf8(const string& text)
 
         char buff[8];
         auto charLen = utf8proc_encode_char(c, (utf8proc_uint8_t *)buff);
-        result.append(buff, charLen);
+        result.append(buff, static_cast<size_t>(charLen));
     }
 
     return result;
@@ -1756,18 +1549,22 @@ bool Utils::utf8toUnicode(const uint8_t *src, unsigned srclen, string *result)
     return true;
 }
 
-std::string Utils::stringToHex(const std::string &input)
+std::string Utils::stringToHex(const std::string& input, bool spaceBetweenBytes)
 {
     static const char* const lut = "0123456789ABCDEF";
     size_t len = input.length();
 
     std::string output;
-    output.reserve(2 * len);
+    output.reserve(2 * len + (spaceBetweenBytes ? len : 0));
     for (size_t i = 0; i < len; ++i)
     {
-        const unsigned char c = input[i];
+        const unsigned char c = static_cast<unsigned char>(input[i]);
         output.push_back(lut[c >> 4]);
         output.push_back(lut[c & 15]);
+        if (spaceBetweenBytes && i + 1 < len)
+        {
+            output.push_back(' ');
+        }
     }
     return output;
 }
@@ -1810,6 +1607,40 @@ std::string Utils::uint64ToHexString(uint64_t input)
     outputStream << std::hex << std::setfill('0') << std::setw(16) << input;
     std::string output = outputStream.str();
     return output;
+}
+
+int Utils::icasecmp(const std::string& lhs, const std::string& rhs)
+{
+    return icasecmp(lhs.c_str(), rhs.c_str());
+}
+
+int Utils::icasecmp(const char* lhs, const char* rhs)
+{
+    assert(lhs);
+    assert(rhs);
+
+#ifdef _WIN32
+    return _stricmp(lhs, rhs);
+#else // _WIN32
+    return strcasecmp(lhs, rhs);
+#endif // ! _WIN32
+}
+
+int Utils::icasecmp(const std::wstring& lhs, const std::wstring& rhs)
+{
+    return icasecmp(lhs.c_str(), rhs.c_str());
+}
+
+int Utils::icasecmp(const wchar_t* lhs, const wchar_t* rhs)
+{
+    assert(lhs);
+    assert(rhs);
+
+#ifdef _WIN32
+    return _wcsicmp(lhs, rhs);
+#else // _WIN32
+    return wcscasecmp(lhs, rhs);
+#endif // ! _WIN32
 }
 
 int Utils::icasecmp(const std::string& lhs,
@@ -1988,16 +1819,65 @@ std::string Utils::join(const std::vector<std::string>& items, const std::string
     return r;
 }
 
-bool Utils::startswith(const std::string& str, const std::string& start)
+template<typename T>
+bool Utils::startswith(const std::basic_string<T>& str, const std::basic_string<T>& start)
 {
     if (str.length() < start.length()) return false;
-    return memcmp(str.data(), start.data(), start.length()) == 0;
+    return memcmp(str.data(), start.data(), start.length() * sizeof(T)) == 0;
 }
 
-bool Utils::startswith(const std::string &str, char chr)
+template bool Utils::startswith<char>(const std::string&, const std::string&);
+template bool Utils::startswith<wchar_t>(const std::wstring&, const std::wstring&);
+
+template<typename T>
+const T* Utils::startswith(const T* str, const T* start)
 {
-    return str.length() >= 1 && chr == str.front();
+    if (!str || !start)
+    {
+        return nullptr;
+    }
+    while (*str == *start)
+    {
+        if (*str == 0)
+        {
+            return str;
+        }
+        str++;
+        start++;
+    }
+    return *start == 0 ? str : nullptr;
 }
+
+template const char* Utils::startswith<char>(const char*, const char*);
+template const wchar_t* Utils::startswith<wchar_t>(const wchar_t*, const wchar_t*);
+
+template<typename T>
+bool Utils::endswith(const T* str, size_t strLen, const T* suffix, size_t sfxLen)
+{
+    if (strLen < sfxLen)
+    {
+        return false;
+    }
+    if (!str || !suffix)
+    {
+        return false;
+    }
+    const T* end = str + strLen;
+    const T* start = end - sfxLen;
+    while (start < end)
+    {
+        if (*start != *suffix)
+        {
+            return false;
+        }
+        start++;
+        suffix++;
+    }
+    return true;
+}
+
+template bool Utils::endswith(const char*, size_t, const char*, size_t);
+template bool Utils::endswith(const wchar_t*, size_t, const wchar_t*, size_t);
 
 bool Utils::endswith(const std::string &str, char chr)
 {
@@ -2015,6 +1895,11 @@ string Utils::trim(const string& str, const string& trimchrs)
     string::size_type e = str.find_last_not_of(trimchrs);
     if (e == string::npos) return "";	// impossible
     return str.substr(s, e - s + 1);
+}
+
+std::string Utils::getIcuVersion()
+{
+    return U_ICU_VERSION;
 }
 
 struct tm* m_localtime(m_time_t ttime, struct tm *dt)
@@ -2071,7 +1956,7 @@ m_time_t m_mktime_UTC(const struct tm *src)
 {
     struct tm dst = *src;
     m_time_t t = 0;
-#if _MSC_VER >= 1400 || defined(__MINGW32__) // MSVCRT (2005+)
+#if defined(_MSC_VER) || defined(__MINGW32__)
     t = mktime(&dst);
     TIME_ZONE_INFORMATION TimeZoneInfo;
     GetTimeZoneInformation(&TimeZoneInfo);
@@ -2101,7 +1986,7 @@ extern time_t stringToTimestamp(string stime, date_time_format_t format)
     struct tm dt;
     memset(&dt, 0, sizeof(struct tm));
 #ifdef _WIN32
-    for (int i = 0; i < stime.size(); i++)
+    for (size_t i = 0; i < stime.size(); i++)
     {
         if ( (stime.at(i) < '0') || (stime.at(i) > '9') )
         {
@@ -2638,7 +2523,7 @@ void MegaClientAsyncQueue::push(std::function<void(SymmCipher&)> f, bool discard
 MegaClientAsyncQueue::MegaClientAsyncQueue(Waiter& w, unsigned threadCount)
     : mWaiter(w)
 {
-    for (int i = threadCount; i--; )
+    for (unsigned i = threadCount; i--;)
     {
         try
         {
@@ -2783,7 +2668,7 @@ bool readLines(const std::string& input, string_vector& destination)
         while (delim < end && *delim != '\r' && *delim != '\n')
         {
             ++delim;
-            whitespace += is_space(*whitespace);
+            whitespace += is_space(static_cast<unsigned int>(*whitespace));
         }
 
         if (delim != whitespace)
@@ -2899,8 +2784,8 @@ const char* syncPathProblemDebugString(PathProblem r)
     case PathProblem::FileFolderDeletedByUser: return "FileFolderDeletedByUser";
     case PathProblem::MoveToDebrisFolderFailed: return "MoveToDebrisFolderFailed";
     case PathProblem::IgnoreFileMalformed: return "IgnoreFileMalformed";
-    case PathProblem::FilesystemErrorListingFolder: return "FilesystemErrorListingFolder";
-    case PathProblem::FilesystemErrorIdentifyingFolderContent: return "FilesystemErrorIdentifyingFolderContent"; // Deprecated after SDK-3206
+    case PathProblem::FilesystemErrorListingFolder:
+        return "FilesystemErrorListingFolder";
     case PathProblem::WaitingForScanningToComplete: return "WaitingForScanningToComplete";
     case PathProblem::WaitingForAnotherMoveToComplete: return "WaitingForAnotherMoveToComplete";
     case PathProblem::SourceWasMovedElsewhere: return "SourceWasMovedElsewhere";
@@ -2943,7 +2828,7 @@ handle generateDriveId(PrnGen& rng)
     handle driveId;
 
     rng.genblock((byte *)&driveId, sizeof(driveId));
-    driveId |= m_time(nullptr);
+    driveId |= static_cast<handle>(m_time(nullptr));
 
     return driveId;
 }
@@ -3039,7 +2924,7 @@ int platformGetRLimitNumFile()
 #endif
 }
 
-bool platformSetRLimitNumFile(int newNumFileLimit)
+bool platformSetRLimitNumFile([[maybe_unused]] int newNumFileLimit)
 {
 #ifndef WIN32
     struct rlimit rl{0,0};
@@ -3159,7 +3044,8 @@ double SyncTransferCounts::progress(m_off_t inflightProgress) const
     if (!pending)
         return 1.0; // 100%
 
-    auto completed = mDownloads.mCompletedBytes + mUploads.mCompletedBytes + inflightProgress;
+    auto completed = mDownloads.mCompletedBytes + mUploads.mCompletedBytes +
+                     static_cast<uint64_t>(inflightProgress);
     auto progress = static_cast<double>(completed) / static_cast<double>(pending);
 
     return std::min(1.0, progress);
@@ -3236,6 +3122,47 @@ string connDirectionToStr(mega::direction_t directionType)
         default:
             return "UNKNOWN";
     }
+}
+
+std::string_view toString(const PasswordEntryError err)
+{
+    switch (err)
+    {
+        case PasswordEntryError::OK:
+            return "Ok";
+        case PasswordEntryError::PARSE_ERROR:
+            return "Parse error";
+        case PasswordEntryError::MISSING_PASSWORD:
+            return "Missing password";
+        case PasswordEntryError::MISSING_NAME:
+            return "Missing name";
+        case PasswordEntryError::MISSING_TOTP_SHARED_SECRET:
+            return "Missing totp shared secret";
+        case PasswordEntryError::INVALID_TOTP_SHARED_SECRET:
+            return "Invalid totp shared secret";
+        case PasswordEntryError::MISSING_TOTP_NDIGITS:
+            return "Missing totp ndigits";
+        case PasswordEntryError::INVALID_TOTP_NDIGITS:
+            return "Invalid totp ndigits";
+        case PasswordEntryError::MISSING_TOTP_EXPT:
+            return "Missing totp expt";
+        case PasswordEntryError::INVALID_TOTP_EXPT:
+            return "Invalid totp expt";
+        case PasswordEntryError::MISSING_TOTP_HASH_ALG:
+            return "Missing totp hash alg";
+        case PasswordEntryError::INVALID_TOTP_HASH_ALG:
+            return "Invalid totp hash alg";
+        case PasswordEntryError::MISSING_CREDIT_CARD_NUMBER:
+            return "Missing credit card number";
+        case PasswordEntryError::INVALID_CREDIT_CARD_NUMBER:
+            return "Invalid credit card number";
+        case PasswordEntryError::INVALID_CREDIT_CARD_CVV:
+            return "Invalid credit card cvv (card validation value)";
+        case PasswordEntryError::INVALID_CREDIT_CARD_EXPIRATION_DATE:
+            return "Invalid credit card expiration date";
+    }
+    assert(false);
+    return "Unknown error";
 }
 
 const char* toString(retryreason_t reason)
@@ -3334,30 +3261,39 @@ bool TextPattern::isOnlyWildCards(const std::string& text)
                        });
 }
 
-std::set<std::string>::iterator getTagPosition(std::set<std::string>& tokens, const std::string& tag)
+std::set<std::string>::iterator getTagPosition(std::set<std::string>& tokens,
+                                               const std::string& pattern,
+                                               bool stripAccents)
 {
-    const std::string pattern = escapeWildCards(tag.c_str());
-    return std::find_if(tokens.begin(),
-                        tokens.end(),
-                        [&pattern](const std::string& token)
-                        {
-                            return likeCompare(pattern.c_str(), token.c_str());
-                        });
+    return std::find_if(
+        tokens.begin(),
+        tokens.end(),
+        [&](const std::string& token)
+        {
+            return likeCompare(pattern.c_str(), token.c_str(), ESCAPE_CHARACTER, stripAccents);
+        });
 }
 
-bool foldCaseAccentEqual(uint32_t codePoint1, uint32_t codePoint2)
+bool foldCaseAccentEqual(uint32_t codePoint1, uint32_t codePoint2, bool stripAccents)
 {
     // 8 is big enough decompose one unicode point
     using Buffer = std::array<utf8proc_int32_t, 8>;
 
-    auto foldCaseAccent = [](uint32_t codePoint, Buffer& buff)
+    // convenience.
+    auto options = UTF8PROC_CASEFOLD | UTF8PROC_COMPOSE | UTF8PROC_NULLTERM | UTF8PROC_STABLE;
+
+    // Strip accents if desired.
+    if (stripAccents)
+    {
+        options |= UTF8PROC_STRIPMARK;
+    }
+
+    auto foldCaseAccent = [options](uint32_t codePoint, Buffer& buff)
     {
         return utf8proc_decompose_char((utf8proc_int32_t)codePoint,
                                        buff.data(),
                                        static_cast<utf8proc_ssize_t>(buff.size()),
-                                       (utf8proc_option_t)(UTF8PROC_NULLTERM | UTF8PROC_STABLE |
-                                                           UTF8PROC_COMPOSE | UTF8PROC_STRIPMARK |
-                                                           UTF8PROC_CASEFOLD),
+                                       static_cast<utf8proc_option_t>(options),
                                        nullptr);
     };
 
@@ -3406,9 +3342,10 @@ assert(*zIn);                                         \
         while ((*zIn & 0xc0)==0x80){zIn++;}           \
 }
 
-int icuLikeCompare(const uint8_t *zPattern,   // LIKE pattern
-                   const uint8_t *zString,    // The UTF-8 string to compare against
-                   const UChar32 uEsc)        // The escape character
+int icuLikeCompare(const uint8_t* zPattern, // LIKE pattern
+                   const uint8_t* zString, // The UTF-8 string to compare against
+                   const UChar32 uEsc, // The escape character
+                   const bool stripAccents) // Whether we should strip accents
 {
     // Define Linux wildcards
     static const uint32_t MATCH_ONE = static_cast<uint32_t>(WILDCARD_MATCH_ONE);
@@ -3456,7 +3393,7 @@ int icuLikeCompare(const uint8_t *zPattern,   // LIKE pattern
 
             while (*zString)
             {
-                if (icuLikeCompare(zPattern, zString, uEsc))
+                if (icuLikeCompare(zPattern, zString, uEsc, stripAccents))
                 {
                     return 1;
                 }
@@ -3484,7 +3421,7 @@ int icuLikeCompare(const uint8_t *zPattern,   // LIKE pattern
             // Case 4
             uint32_t uString;
             SQLITE_ICU_READ_UTF8(zString, uString);
-            if (!foldCaseAccentEqual(uString, uPattern))
+            if (!foldCaseAccentEqual(uString, uPattern, stripAccents))
             {
                 return 0;
             }
@@ -3496,11 +3433,12 @@ int icuLikeCompare(const uint8_t *zPattern,   // LIKE pattern
     return *zString == 0;
 }
 
-bool likeCompare(const char* pattern, const char* str, const UChar32 esc)
+bool likeCompare(const char* pattern, const char* str, const UChar32 esc, bool stripAccents)
 {
     return static_cast<bool>(icuLikeCompare(reinterpret_cast<const uint8_t*>(pattern),
                                             reinterpret_cast<const uint8_t*>(str),
-                                            esc));
+                                            esc,
+                                            stripAccents));
 }
 
 // Get the current process ID
@@ -3509,7 +3447,7 @@ unsigned long getCurrentPid()
 #ifdef WIN32
     return GetCurrentProcessId();
 #else
-    return getpid();
+    return static_cast<unsigned long>(getpid());
 #endif
 }
 
@@ -3572,7 +3510,7 @@ SplitResult split(const char* begin, const char* end, char delimiter)
 
     // Assume string doesn't contain the delimiter.
     result.first.first   = begin;
-    result.first.second  = end - begin;
+    result.first.second = static_cast<size_t>(end - begin);
     result.second.first  = nullptr;
     result.second.second = 0;
 
@@ -3583,9 +3521,9 @@ SplitResult split(const char* begin, const char* end, char delimiter)
     if (current != end)
     {
         // Tweak result as necessary.
-        result.first.second  = current - begin;
+        result.first.second = static_cast<size_t>(current - begin);
         result.second.first  = current;
-        result.second.second = end - current;
+        result.second.second = static_cast<size_t>(end - current);
     }
 
     // Return result to caller.
@@ -3612,7 +3550,9 @@ int naturalsorting_compare(const char* i, const char* j)
         if (stringMode)
         {
             char char_i, char_j;
-            while ((char_i = *i) && (char_j = *j))
+            char_i = *i;
+            char_j = *j;
+            while (char_i && char_j)
             {
                 CharType iCharType = getCharType(static_cast<unsigned int>(*i));
                 CharType jCharType = getCharType(static_cast<unsigned int>(*j));
@@ -3641,15 +3581,20 @@ int naturalsorting_compare(const char* i, const char* j)
                 {
                     return iCharType < jCharType ? -1 : 1;
                 }
+                char_i = *i;
+                char_j = *j;
             }
         }
         else // we are comparing numbers on both strings
         {
+            auto m = i;
+            auto n = j;
+
             uint64_t number_i = 0;
             unsigned int i_overflow_count = 0;
-            while (*i && is_digit(*i))
+            while (*i && is_digit(static_cast<unsigned int>(*i)))
             {
-                number_i = number_i * 10 + (*i - 48); // '0' ASCII code is 48
+                number_i = number_i * 10 + static_cast<uint64_t>(*i - 48); // '0' ASCII code is 48
                 ++i;
 
                 // check the number won't overflow upon addition of next char
@@ -3662,9 +3607,9 @@ int naturalsorting_compare(const char* i, const char* j)
 
             uint64_t number_j = 0;
             unsigned int j_overflow_count = 0;
-            while (*j && is_digit(*j))
+            while (*j && is_digit(static_cast<unsigned int>(*j)))
             {
-                number_j = number_j * 10 + (*j - 48);
+                number_j = number_j * 10 + static_cast<uint64_t>(*j - 48);
                 ++j;
 
                 // check the number won't overflow upon addition of next char
@@ -3675,7 +3620,8 @@ int naturalsorting_compare(const char* i, const char* j)
                 }
             }
 
-            int difference = i_overflow_count - j_overflow_count;
+            int difference = static_cast<int>(i_overflow_count - j_overflow_count);
+
             if (difference)
             {
                 return difference;
@@ -3684,6 +3630,23 @@ int naturalsorting_compare(const char* i, const char* j)
             if (number_i != number_j)
             {
                 return number_i > number_j ? 1 : -1;
+            }
+
+            auto length = static_cast<std::size_t>(std::min(i - m, j - n));
+
+            difference = strncmp(m, n, length);
+            if (difference)
+            {
+                return difference;
+            }
+
+            auto relation = (i - m) - (j - n);
+
+            relation = std::clamp<decltype(relation)>(relation, -1, 1);
+
+            if (relation)
+            {
+                return static_cast<int>(relation);
             }
 
             stringMode = true;
@@ -3723,6 +3686,40 @@ size_t fileExtensionDotPosition(const std::string& fileName)
         return fileName.size();
     else
         return dotPos;
+}
+
+std::string getThisThreadIdStr()
+{
+    std::stringstream ss;
+    ss << std::this_thread::get_id();
+    return ss.str();
+}
+
+storagestatus_t getStorageStatusFromString(const std::string& storageStatusStr)
+{
+    if (storageStatusStr.empty())
+    {
+        return STORAGE_GREEN;
+    }
+
+    const auto storageStatusOpt = stringToNumber<int>(storageStatusStr);
+    if (!storageStatusOpt)
+    {
+        LOG_err << "[getStorageStatusFromString] error: cannot parse storage status from value = "
+                << storageStatusStr;
+        return STORAGE_UNKNOWN;
+    }
+
+    const auto storageStatus = static_cast<storagestatus_t>(*storageStatusOpt);
+    switch (storageStatus)
+    {
+        case STORAGE_RED:
+        case STORAGE_ORANGE:
+        case STORAGE_GREEN:
+            return storageStatus;
+        default:
+            return STORAGE_UNKNOWN;
+    }
 }
 
 } // namespace mega

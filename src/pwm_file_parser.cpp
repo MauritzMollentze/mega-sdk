@@ -1,6 +1,21 @@
 #include "mega/pwm_file_parser.h"
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+#pragma GCC diagnostic ignored "-Wtype-limits"
+#endif
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4244) // conversion from '__int64' to 'int'
+#endif
 #include "mega/mega_csv.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 namespace mega::pwm::import
 {

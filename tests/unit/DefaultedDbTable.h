@@ -51,7 +51,10 @@ public:
         return false;
         //throw NotImplemented{__func__};
     }
-    bool getNodesByFingerprint(const std::string& fingerprint, std::vector<std::pair<mega::NodeHandle, mega::NodeSerialized>>&) override
+
+    bool getNodesByFingerprint(
+        const std::string& /*fingerprint*/,
+        std::vector<std::pair<mega::NodeHandle, mega::NodeSerialized>>&) override
     {
         return false;
     }
@@ -74,7 +77,7 @@ public:
         return false;
     }
 
-    uint64_t getNumberOfChildren(mega::NodeHandle parentHandle) override
+    uint64_t getNumberOfChildren(mega::NodeHandle /*parentHandle*/) override
     {
         return 0;
     }
@@ -88,14 +91,15 @@ public:
         return false;
         //throw NotImplemented(__func__);
     }
-    bool getAllNodeTags(const std::string&, std::set<std::string>&, mega::CancelToken) override
+
+    auto getNodeTagsBelow(mega::CancelToken, mega::NodeHandle, const std::string&)
+        -> std::optional<std::set<std::string>> override
     {
-        return false;
-        // throw NotImplemented(__func__);
+        return std::nullopt;
     }
 
-    bool getRecentNodes(const mega::NodeSearchPage& page,
-                        mega::m_time_t since,
+    bool getRecentNodes(const mega::NodeSearchPage&,
+                        mega::m_time_t /*since*/,
                         std::vector<std::pair<mega::NodeHandle, mega::NodeSerialized>>&) override
     {
         return false;
@@ -104,11 +108,19 @@ public:
     {
         return false;
     }
-    bool childNodeByNameType(mega::NodeHandle, const std::string& name, mega::nodetype_t, std::pair<mega::NodeHandle, mega::NodeSerialized>&) override
+
+    bool childNodeByNameType(mega::NodeHandle,
+                             const std::string& /*name*/,
+                             mega::nodetype_t,
+                             std::pair<mega::NodeHandle, mega::NodeSerialized>&) override
     {
         return false;
     }
-    bool getNodeSizeTypeAndFlags(mega::NodeHandle node, m_off_t& size, mega::nodetype_t& nodeType, uint64_t& oldFlags) override
+
+    bool getNodeSizeTypeAndFlags(mega::NodeHandle,
+                                 m_off_t& /*size*/,
+                                 mega::nodetype_t&,
+                                 uint64_t& /*oldFlags*/) override
     {
         return false;
     }
@@ -120,19 +132,19 @@ public:
     {
         return false;
     }
-    uint64_t getNumberOfChildrenByType(mega::NodeHandle parentHandle, mega::nodetype_t nodeType) override
+
+    uint64_t getNumberOfChildrenByType(mega::NodeHandle /*parentHandle*/, mega::nodetype_t) override
     {
       return 0;
     }
 
-    void updateCounter(mega::NodeHandle, const std::string&) override
-    {
+    void updateCounter(mega::NodeHandle, const std::string&) override {}
 
-    }
-    void updateCounterAndFlags(mega::NodeHandle nodeHandle, uint64_t flags, const std::string& nodeCounterBlob) override
-    {
+    void updateCounterAndFlags(mega::NodeHandle,
+                               uint64_t /*flags*/,
+                               const std::string& /*nodeCounterBlob*/) override
+    {}
 
-    }
     void createIndexes() override
     {
 
@@ -176,15 +188,11 @@ public:
     }
     void abort() override
     {
-        //throw NotImplemented{__func__};
+        // throw NotImplemented{__func__};
     }
     void remove() override
     {
         //throw NotImplemented{__func__};
-    }
-    bool inTransaction() const override
-    {
-        return false;
     }
 };
 

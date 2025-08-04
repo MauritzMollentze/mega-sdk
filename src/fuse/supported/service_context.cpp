@@ -1,14 +1,14 @@
 #include <algorithm>
 #include <cassert>
 
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/client.h>
 #include <mega/fuse/common/database_builder.h>
-#include <mega/fuse/common/error_or.h>
-#include <mega/fuse/common/inode_info.h>
 #include <mega/fuse/common/inode.h>
+#include <mega/fuse/common/inode_info.h>
 #include <mega/fuse/common/mount_info.h>
 #include <mega/fuse/common/mount_result.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/ref.h>
 #include <mega/fuse/common/service.h>
 #include <mega/fuse/platform/service_context.h>
@@ -22,6 +22,8 @@ namespace fuse
 namespace platform
 {
 
+using namespace common;
+
 static Database dbInit(const Client& client);
 
 static MountResult dbOperation(void (DatabaseBuilder::*op)(std::size_t),
@@ -33,7 +35,7 @@ static LocalPath dbPath(const Client& client);
 ServiceContext::ServiceContext(const ServiceFlags& flags, Service& service)
   : fuse::ServiceContext(service)
   , mDatabase(dbInit(service.mClient))
-  , mExecutor(flags.mServiceExecutorFlags)
+  , mExecutor(flags.mServiceExecutorFlags, logger())
   , mFileExtensionDB()
   , mInodeDB(*this)
   , mFileCache(*this)
@@ -104,14 +106,14 @@ ErrorOr<InodeInfo> ServiceContext::describe(const NormalizedPath& path) const
 
     // No enabled mount contains this path.
     if (!mount)
-        return API_ENOENT;
+        return unexpected(API_ENOENT);
 
     // Try and locate the inode associated with this path.
     auto result = mInodeDB.lookup(relativePath, mount->mHandle);
 
     // We couldn't find the inode.
     if (result.second != API_OK)
-        return result.second;
+        return unexpected(result.second);
 
     // Retrieve the inode's description.
     auto info = result.first->info();
@@ -125,11 +127,11 @@ ErrorOr<InodeInfo> ServiceContext::describe(const NormalizedPath& path) const
 }
 
 void ServiceContext::disable(MountDisabledCallback callback,
-                             const LocalPath& path,
+                             const std::string& name,
                              bool remember)
 {
     mMountDB.disable(std::move(callback),
-                     path,
+                     name,
                      remember);
 }
 
@@ -150,14 +152,14 @@ MountResult ServiceContext::downgrade(const LocalPath& path,
                        target);
 }
 
-MountResult ServiceContext::enable(const LocalPath& path, bool remember)
+MountResult ServiceContext::enable(const std::string& name, bool remember)
 {
-    return mMountDB.enable(path, remember);
+    return mMountDB.enable(name, remember);
 }
 
-bool ServiceContext::enabled(const LocalPath& path) const
+bool ServiceContext::enabled(const std::string& name) const
 {
-    return mMountDB.enabled(path);
+    return mMountDB.enabled(name);
 }
 
 Task ServiceContext::execute(std::function<void(const Task&)> function)
@@ -165,15 +167,15 @@ Task ServiceContext::execute(std::function<void(const Task&)> function)
     return mExecutor.execute(std::move(function), true);
 }
 
-MountResult ServiceContext::flags(const LocalPath& path,
+MountResult ServiceContext::flags(const std::string& name,
                                   const MountFlags& flags)
 {
-    return mMountDB.flags(path, flags);
+    return mMountDB.flags(name, flags);
 }
 
-MountFlagsPtr ServiceContext::flags(const LocalPath& path) const
+MountFlagsPtr ServiceContext::flags(const std::string& name) const
 {
-    return mMountDB.flags(path);
+    return mMountDB.flags(name);
 }
 
 FileSystemAccess& ServiceContext::fsAccess() const
@@ -181,24 +183,24 @@ FileSystemAccess& ServiceContext::fsAccess() const
     return client().fsAccess();
 }
 
-MountInfoPtr ServiceContext::get(const LocalPath& path) const
+MountInfoPtr ServiceContext::get(const std::string& name) const
 {
-    return mMountDB.get(path);
+    return mMountDB.get(name);
 }
 
-MountInfoVector ServiceContext::get(bool enabled) const
+MountInfoVector ServiceContext::get(bool onlyEnabled) const
 {
-    return mMountDB.get(enabled);
+    return mMountDB.get(onlyEnabled);
 }
 
-NormalizedPathVector ServiceContext::paths(const std::string& name) const
+NormalizedPath ServiceContext::path(const std::string& name) const
 {
-    return mMountDB.paths(name);
+    return mMountDB.path(name);
 }
 
-MountResult ServiceContext::remove(const LocalPath& path)
+MountResult ServiceContext::remove(const std::string& name)
 {
-    return mMountDB.remove(path);
+    return mMountDB.remove(name);
 }
 
 void ServiceContext::serviceFlags(const ServiceFlags& flags)
@@ -230,7 +232,7 @@ MountResult ServiceContext::upgrade(const LocalPath& path,
 
 Database dbInit(const Client& client)
 {
-    Database database(dbPath(client));
+    Database database(logger(), dbPath(client));
 
     DatabaseBuilder(database).build();
 
@@ -244,7 +246,7 @@ try
 {
     assert(op);
 
-    Database database(path);
+    Database database(logger(), path);
     DatabaseBuilder builder(database);
 
     (builder.*op)(target);

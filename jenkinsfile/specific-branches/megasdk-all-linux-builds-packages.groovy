@@ -12,12 +12,11 @@ pipeline {
         booleanParam(name: 'UPLOAD_TO_REPOSITORY', defaultValue: false, description: 'Should the package be uploaded to artifactory?')
         booleanParam(name: 'RESULT_TO_SLACK', defaultValue: true, description: 'Should the job result be sent to slack?')
         booleanParam(name: 'CUSTOM_BUILD', defaultValue: false, description: 'If true, will use DISTRO_TO_BUILD and ARCH_TO_BUILD. If false, will build all distributions')
-        choice(name: 'ARCH_TO_BUILD', choices: ['amd64', 'armhf'], description: 'Only used if CUSTOM_BUILD is true')        
+        choice(name: 'ARCH_TO_BUILD', choices: ['amd64', 'armhf','arm64'], description: 'Only used if CUSTOM_BUILD is true')        
         string(name: 'DISTRO_TO_BUILD', defaultValue: 'xUbuntu_22.04', description: 'Only used if CUSTOM_BUILD is true')
         string(name: 'SDK_BRANCH', defaultValue: 'develop', description: 'Define a custom SDK branch.')
     }
     environment {
-        gitlab_token = credentials('jenkins_sdk_token')
         SDK_BRANCH = "${params.SDK_BRANCH}"
     }
 
@@ -58,7 +57,17 @@ pipeline {
                         if ( params.UPLOAD_TO_REPOSITORY == true) {
                             //def SDK_VERSION = getVersionFromHeader("include/mega/version.h")
                             def CURRENT_DATE = new Date().format('yyyyMMdd')
-                            sh "cd ${env.INTERNAL_REPO_PATH}/repo/private/$DISTRO_TO_BUILD && jf rt upload --regexp '((x86_64|amd64)/megasdk.*deb\$|(x86_64|amd64)/megasdk.*rpm\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.zst\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.xz\$)' sdk/releases/$CURRENT_DATE/linux/$DISTRO_TO_BUILD/"
+                            withCredentials([string(credentialsId: 'MEGASDK_ARTIFACTORY_TOKEN', variable: 'MEGASDK_ARTIFACTORY_TOKEN')]) {
+                                dir("${env.INTERNAL_REPO_PATH}/repo/private/$DISTRO_TO_BUILD"){
+                                    sh """
+                                        jf rt upload \
+                                            --url ${REPO_URL} \
+                                            --access-token ${MEGASDK_ARTIFACTORY_TOKEN} \
+                                            --regexp '((x86_64|amd64)/megasdk.*deb\$|(x86_64|amd64)/megasdk.*rpm\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.zst\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.xz\$)' \
+                                            sdk/releases/$CURRENT_DATE/linux/$DISTRO_TO_BUILD/
+                                    """
+                                }
+                            }
                             echo "Packages successfully uploaded. URL: [${env.REPO_URL}/sdk/releases/$CURRENT_DATE/linux/$DISTRO_TO_BUILD/]"
                         }
                     }
@@ -81,34 +90,34 @@ pipeline {
                 axes {
                     axis { 
                         name 'ARCHITECTURE'; 
-                        values 'amd64','armhf'
+                        values 'amd64','armhf','arm64'
                     }
                     axis { 
                         name 'DISTRO'; 
-                        values  'xUbuntu_24.10','xUbuntu_24.04', 'xUbuntu_23.10','xUbuntu_22.04', 'xUbuntu_20.04',
+                        values  'xUbuntu_25.04','xUbuntu_24.10','xUbuntu_24.04','xUbuntu_22.04', 'xUbuntu_20.04',
                                 'Debian_11','Debian_12','Debian_testing',
                                 'DEB_Arch_Extra',
                                 'Raspbian_11', 'Raspbian_12',
-                                'Fedora_39', 'Fedora_40', 'Fedora_41',
-                                'openSUSE_Leap_15.5','openSUSE_Leap_15.6', 'openSUSE_Tumbleweed'
+                                'Fedora_40', 'Fedora_42',
+                                'openSUSE_Leap_15.6', 'openSUSE_Tumbleweed'
                     }
                 }
                 excludes {
-                    exclude {   
+                    exclude {
                         axis { 
                             name 'ARCHITECTURE'; 
-                            values 'armhf' 
+                            values 'armhf'
                         } 
                         axis { 
                             name 'DISTRO'; 
-                            values  'xUbuntu_24.10','xUbuntu_24.04', 'xUbuntu_23.10','xUbuntu_22.04', 'xUbuntu_20.04',
+                            values  'xUbuntu_25.04','xUbuntu_24.10','xUbuntu_24.04','xUbuntu_22.04', 'xUbuntu_20.04',
                                     'Debian_11','Debian_12','Debian_testing',
                                     'DEB_Arch_Extra',
-                                    'Fedora_39', 'Fedora_40', 'Fedora_41',
-                                    'openSUSE_Leap_15.5','openSUSE_Leap_15.6', 'openSUSE_Tumbleweed'
+                                    'Fedora_40', 'Fedora_42',
+                                    'openSUSE_Leap_15.6', 'openSUSE_Tumbleweed'
                         }
                     }
-                    exclude {   
+                    exclude {
                         axis { 
                             name 'ARCHITECTURE'; 
                             values 'amd64' 
@@ -116,6 +125,17 @@ pipeline {
                         axis { 
                             name 'DISTRO'; 
                             values  'Raspbian_11', 'Raspbian_12'
+                        }
+                    }
+                    exclude {
+                        axis { 
+                            name 'ARCHITECTURE'; 
+                            values 'arm64' 
+                        } 
+                        axis { 
+                            name 'DISTRO'; 
+                            values  'DEB_Arch_Extra','Debian_11','xUbuntu_20.04','xUbuntu_24.04','Fedora_40', 'Fedora_42',
+                                    'Raspbian_11', 'Raspbian_12','openSUSE_Tumbleweed'
                         }
                     }
                 }
@@ -147,8 +167,23 @@ pipeline {
                             dir(linux_sources_workspace) {
                                 script{
                                     def CURRENT_DATE = new Date().format('yyyyMMdd')
-                                    sh "jf rt del sdk/releases/$CURRENT_DATE/linux/$DISTRO/"
-                                    sh "cd ${env.INTERNAL_REPO_PATH}/repo/private/$DISTRO && jf rt upload --regexp '((x86_64|amd64)/megasdk.*deb\$|(x86_64|amd64)/megasdk.*rpm\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.zst\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.xz\$)' sdk/releases/$CURRENT_DATE/linux/$DISTRO/"  
+                                    withCredentials([string(credentialsId: 'MEGASDK_ARTIFACTORY_TOKEN', variable: 'MEGASDK_ARTIFACTORY_TOKEN')]) {
+                                        sh """
+                                            jf rt del \
+                                                --url ${REPO_URL} \
+                                                --access-token ${MEGASDK_ARTIFACTORY_TOKEN} \
+                                                sdk/releases/$CURRENT_DATE/linux/$DISTRO/
+                                        """
+                                        dir("${env.INTERNAL_REPO_PATH}/repo/private/$DISTRO"){
+                                            sh """
+                                                jf rt upload \
+                                                    --url ${REPO_URL} \
+                                                    --access-token ${MEGASDK_ARTIFACTORY_TOKEN} \
+                                                    --regexp '((x86_64|amd64)/megasdk.*deb\$|(x86_64|amd64)/megasdk.*rpm\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.zst\$|(x86_64|amd64)/megasdk.*\\.pkg\\.tar\\.xz\$)' \
+                                                    sdk/releases/$CURRENT_DATE/linux/$DISTRO/
+                                            """
+                                        }
+                                    }
                                     echo "Packages successfully uploaded. URL: [${env.REPO_URL}/sdk/releases/$CURRENT_DATE/linux/$DISTRO/]"
                                 }
                             }
@@ -167,14 +202,13 @@ pipeline {
                     messageStatus = currentBuild.currentResult
                     messageColor = messageStatus == 'SUCCESS'? "#00FF00": "#FF0000" //green or red
                     message = """
-                        Jenkins job #${BUILD_ID} ended with status '${messageStatus}'.
-                        See: ${BUILD_URL}
+                        *Linux* <${BUILD_URL}|Build result>: '${messageStatus}'.
                         SDK branch: `${SDK_BRANCH}`
-                        SDK_commit: `${sdk_commit}`
+                        SDK commit: `${sdk_commit}`
                     """.stripIndent()
 
                     if (failedDistros.size() > 0) {
-                        message += "\n\nFailed distributions: ${failedDistros.join(', ')}"
+                        message += "\nFailed distributions: ${failedDistros.join(', ')}"
                     }
                     
                     withCredentials([string(credentialsId: 'slack_webhook_sdk_report', variable: 'SLACK_WEBHOOK_URL')]) {
@@ -195,11 +229,12 @@ pipeline {
                                         ]
                                     }
                                     ]
-                                }' ${SLACK_WEBHOOK_URL}
+                                }' \${SLACK_WEBHOOK_URL}
                         """
                     }
                 }
             }
+            deleteDir()
         }
     }
 }

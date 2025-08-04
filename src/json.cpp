@@ -113,11 +113,11 @@ bool JSON::storeobject(string* s)
             {
                 if (*pos == '"')
                 {
-                    s->assign(pos + 1, ptr - pos - 2);
+                    s->assign(pos + 1, static_cast<size_t>(ptr - pos - 2));
                 }
                 else
                 {
-                    s->assign(pos, ptr - pos);
+                    s->assign(pos, static_cast<size_t>(ptr - pos));
                 }
             }
 
@@ -204,7 +204,7 @@ nameid JSON::getnameid(const char* ptr) const
 
     while (*ptr && *ptr != '"')
     {
-        id = (id << 8) + *ptr++;
+        id = (id << 8) + static_cast<nameid>(*ptr++);
     }
 
     return id;
@@ -283,7 +283,7 @@ nameid JSON::getNameidSkipNull(bool skipnullvalues)
     {
         while (*ptr && *ptr != '"')
         {
-            id = (id << 8) + *ptr++;
+            id = (id << 8) + static_cast<nameid>(*ptr++);
         }
 
         assert(*ptr == '"'); // if either assert fails, check the json syntax, it might be something new/changed
@@ -363,14 +363,16 @@ bool JSON::storebinary(string* dst)
     {
         const char* ptr;
 
-        if (!(ptr = strchr(pos + 1, '"')))
+        ptr = strchr(pos + 1, '"');
+        if (!ptr)
         {
             LOG_err << "Parse error (storebinary)";
             return false;
         }
 
-        dst->resize((ptr - pos - 1) / 4 * 3 + 3);
-        dst->resize(Base64::atob(pos + 1, (byte*)dst->data(), int(dst->size())));
+        dst->resize(static_cast<size_t>((ptr - pos - 1) / 4 * 3 + 3));
+        dst->resize(
+            static_cast<size_t>(Base64::atob(pos + 1, (byte*)dst->data(), int(dst->size()))));
 
         // skip string
         storeobject();
@@ -448,13 +450,18 @@ m_off_t JSON::getint()
     if ((*ptr < '0' || *ptr > '9') && *ptr != '-')
     {
         LOG_err << "Parse error (getint)";
+        // An event about failing to parse the json cannot be sent because no MegaClient instance is
+        // accessible from here.
+        assert(false && "JSON::getint(): Unexpected value in JSON");
+        // It should probably return something less common in this case, like
+        // std::numeric_limits<m_off_t>::min().
         return -1;
     }
 
-    handle r = atoll(ptr);
+    handle r = static_cast<handle>(atoll(ptr));
     storeobject();
 
-    return r;
+    return static_cast<m_off_t>(r);
 }
 
 // decode float
@@ -523,7 +530,7 @@ uint64_t JSON::getuint64()
         ptr++;
     }
 
-    if (!is_digit(*ptr))
+    if (!is_digit(static_cast<unsigned>(*ptr)))
     {
         LOG_err << "Parse error (getuint64)";
         return std::numeric_limits<uint64_t>::max();
@@ -676,7 +683,7 @@ void JSON::unescape(string* s)
                     l = 2;
             }
 
-            s->replace(i, l, &c, 1);
+            s->replace(i, static_cast<size_t>(l), &c, 1);
         }
     }
 }
@@ -744,9 +751,10 @@ void JSON::copystring(string* s, const char* p)
     {
         const char* pp;
 
-        if ((pp = strchr(p, '"')))
+        pp = strchr(p, '"');
+        if (pp)
         {
-            s->assign(p, pp - p);
+            s->assign(p, static_cast<size_t>(pp - p));
         }
         else
         {
@@ -783,7 +791,7 @@ string JSON::stripWhitespace(const char* text)
             result.append(temp);
             result.push_back('"');
         }
-        else if (is_space(*reader.pos))
+        else if (is_space(static_cast<unsigned>(*reader.pos)))
             ++reader.pos;
         else
             result.push_back(*reader.pos++);
@@ -849,7 +857,7 @@ void JSONWriter::arg(const char* name, NodeHandle h)
 
 void JSONWriter::arg(const char* name, const byte* value, int len)
 {
-    char* buf = new char[len * 4 / 3 + 4];
+    char* buf = new char[static_cast<size_t>(len * 4 / 3 + 4)];
 
     Base64::btoa(value, len, buf);
 
@@ -902,7 +910,7 @@ void JSONWriter::appendraw(const char* s)
 
 void JSONWriter::appendraw(const char* s, int len)
 {
-    mJson.append(s, len);
+    mJson.append(s, static_cast<size_t>(len));
 }
 
 void JSONWriter::beginarray()
@@ -968,12 +976,12 @@ void JSONWriter::element(handle h, int len)
 
 void JSONWriter::element(const byte* data, int len)
 {
-    char* buf = new char[len * 4 / 3 + 4];
+    char* buf = new char[static_cast<size_t>(len * 4 / 3 + 4)];
 
     len = Base64::btoa(data, len, buf);
 
     mJson.append(elements() ? ",\"" : "\"");
-    mJson.append(buf, len);
+    mJson.append(buf, static_cast<size_t>(len));
 
     delete[] buf;
 
@@ -999,7 +1007,7 @@ void JSONWriter::element_B64(const string& s)
 
 void JSONWriter::openobject()
 {
-    mLevels[++mLevel] = 0;
+    mLevels[static_cast<size_t>(++mLevel)] = 0;
 }
 
 void JSONWriter::closeobject()
@@ -1026,9 +1034,9 @@ int JSONWriter::elements()
 {
     assert(mLevel >= 0);
 
-    if (!mLevels[mLevel])
+    if (!mLevels[static_cast<size_t>(mLevel)])
     {
-        mLevels[mLevel] = 1;
+        mLevels[static_cast<size_t>(mLevel)] = 1;
         return 0;
     }
 
@@ -1066,7 +1074,7 @@ string JSONWriter::escape(const char* data, size_t length) const
             result.append("\\\\");
             break;
         default:
-            result.push_back(current[-1]);
+            result.push_back(static_cast<char>(current[-1]));
             break;
         }
     }
@@ -1212,15 +1220,16 @@ m_off_t JSONSplitter::processChunk(std::map<string, std::function<bool (JSON *)>
                 auto filterit = filters->find(filter);
                 if (filterit != filters->end() && filterit->second)
                 {
-                    JSON_verbose << "JSON object/array callback for path: " << filter
-                                 << " Data: " << std::string(mLastPos, mPos - mLastPos);
+                    JSON_verbose << "JSON object/array callback for path: " << filter << " Data: "
+                                 << std::string(mLastPos, static_cast<size_t>(mPos - mLastPos));
 
                     JSON jsonData(mLastPos);
                     auto& callback = filterit->second;
                     if (!callback(&jsonData))
                     {
                         LOG_err << "Parsing error processing streaming filter: " << filter
-                                << " Data: " << std::string(mLastPos, mPos - mLastPos);
+                                << " Data: "
+                                << std::string(mLastPos, static_cast<size_t>(mPos - mLastPos));
                         parseError(filters);
                         return 0;
                     }
@@ -1289,14 +1298,14 @@ m_off_t JSONSplitter::processChunk(std::map<string, std::function<bool (JSON *)>
                     if (filterit != filters->end() && filterit->second)
                     {
                         JSON_verbose << "JSON string value callback for: " << filter
-                                     << " Data: " << std::string(mPos, t);
+                                     << " Data: " << std::string(mPos, static_cast<size_t>(t));
 
                         JSON jsonData(mPos);
                         auto& callback = filterit->second;
                         if (!callback(&jsonData))
                         {
                             LOG_err << "Parsing error processing streaming filter: " << filter
-                                    << " Data: " << std::string(mPos, t);
+                                    << " Data: " << std::string(mPos, static_cast<size_t>(t));
                             parseError(filters);
                             return 0;
                         }
@@ -1306,7 +1315,8 @@ m_off_t JSONSplitter::processChunk(std::map<string, std::function<bool (JSON *)>
                 }
 
                 JSON_verbose << "JSON string value parsed at path " << mCurrentPath
-                             << " Data: " << mLastName << " = " << std::string(mPos + 1, t - 2);
+                             << " Data: " << mLastName << " = "
+                             << std::string(mPos + 1, static_cast<size_t>(t - 2));
 
                 mPos += t;
                 mExpectValue = 0;
@@ -1328,9 +1338,9 @@ m_off_t JSONSplitter::processChunk(std::map<string, std::function<bool (JSON *)>
                 }
 
                 JSON_verbose << "JSON property name parsed at path " << mCurrentPath
-                             << " Data: " << std::string(mPos + 1, t - 2);
+                             << " Data: " << std::string(mPos + 1, static_cast<size_t>(t - 2));
 
-                mLastName =  std::string(mPos + 1, t - 2);
+                mLastName = std::string(mPos + 1, static_cast<size_t>(t - 2));
                 mPos += t + 1;
                 mExpectValue = -1;
             }
@@ -1352,8 +1362,8 @@ m_off_t JSONSplitter::processChunk(std::map<string, std::function<bool (JSON *)>
                 break;
             }
 
-            JSON_verbose << "JSON number parsed at path " << mCurrentPath
-                         << " Data: " << mLastName << " = " << std::string(mPos, j);
+            JSON_verbose << "JSON number parsed at path " << mCurrentPath << " Data: " << mLastName
+                         << " = " << std::string(mPos, static_cast<size_t>(j));
 
             mPos += j;
             mExpectValue = 0;
@@ -1371,13 +1381,13 @@ m_off_t JSONSplitter::processChunk(std::map<string, std::function<bool (JSON *)>
                     {
                         JSON jsonData(mLastPos);
                         JSON_verbose << "JSON error callback."
-                                     << " Data: " << std::string(mLastPos, j);
+                                     << " Data: " << std::string(mLastPos, static_cast<size_t>(j));
 
                         auto& callback = filterit->second;
                         if (!callback(&jsonData))
                         {
                             LOG_err << "Parsing error processing error streaming filter"
-                                    << " Data: " << std::string(mLastPos, j);
+                                    << " Data: " << std::string(mLastPos, static_cast<size_t>(j));
                             parseError(filters);
                             return 0;
                         }
@@ -1436,7 +1446,7 @@ bool JSONSplitter::isStarting()
 int JSONSplitter::strEnd()
 {
     const char* ptr = mPos;
-    while ((ptr = strchr(ptr + 1, '"')))
+    while ((ptr = strchr(ptr + 1, '"')) != nullptr)
     {
         const char *e = ptr;
         while (*(--e) == '\\')

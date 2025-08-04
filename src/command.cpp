@@ -20,8 +20,10 @@
  */
 
 #include "mega/command.h"
+
 #include "mega/base64.h"
 #include "mega/megaclient.h"
+#include "mega/tlv.h"
 
 namespace mega {
 Command::Command()
@@ -47,7 +49,7 @@ void Command::addToNodePendingCommands(Node* node)
     node->mPendingChanges.push_back(this);
 }
 
-void Command::removeFromNodePendingCommands(NodeHandle h, MegaClient* client)
+void Command::removeFromNodePendingCommands(NodeHandle h)
 {
     if (auto node = client->nodeByHandle(h))
     {
@@ -88,14 +90,14 @@ bool Command::checkError(Error& errorDetails, JSON& json)
             {
                 switch (json.getnameid())
                 {
-                    case MAKENAMEID3('e', 'r', 'r'):
+                    case makeNameid("err"):
                         errorDetails.setErrorCode(static_cast<error>(json.getint()));
                         errorDetected = true;
                         break;
-                    case 'u':
+                    case makeNameid("u"):
                         errorDetails.setUserStatus(json.getint());
                         break;
-                    case 'l':
+                    case makeNameid("l"):
                         errorDetails.setLinkStatus(json.getint());
                         break;
                     case EOO:
@@ -157,7 +159,7 @@ void Command::createSchedMeetingJson(const ScheduledMeeting* schedMeeting)
 
     if (schedMeeting->flags() && !schedMeeting->flags()->isEmpty())
     {
-        arg("f", static_cast<long>(schedMeeting->flags()->getNumericValue()));
+        arg("f", static_cast<m_off_t>(schedMeeting->flags()->getNumericValue()));
     }
 
     if (MegaClient::isValidMegaTimeStamp(schedMeeting->overrides()))
@@ -257,9 +259,9 @@ void Command::cmd(const char* cmd)
     commandStr = cmd;
 }
 
-void Command::notself(MegaClient *client)
+void Command::notself(MegaClient* clientToIgnoreActionPackets)
 {
-    jsonWriter.notself(client);
+    jsonWriter.notself(clientToIgnoreActionPackets);
 }
 
 // add comma separator unless first element

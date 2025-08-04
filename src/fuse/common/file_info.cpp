@@ -1,7 +1,7 @@
 #include <cassert>
 
+#include <mega/common/error_or.h>
 #include <mega/fuse/common/client.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/file_cache.h>
 #include <mega/fuse/common/file_info.h>
 
@@ -9,6 +9,8 @@ namespace mega
 {
 namespace fuse
 {
+
+using namespace common;
 
 FileInfo::FileInfo(const FileExtension& extension,
                    const FileAccess& fileAccess,
@@ -64,11 +66,11 @@ ErrorOr<FileAccessSharedPtr> FileInfo::open(LocalPath& path) const
 
     // Couldn't open the file for reading and writing.
     if (!fileAccess->fopen(path_, true, true, FSLogging::logOnError))
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Make sure the file's attributes have been loaded.
     if (!fileAccess->fstat())
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Sanity check.
     {

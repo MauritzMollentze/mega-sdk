@@ -284,7 +284,8 @@ public:
             os << message;
         }
         // we can have the message AND the direct messages
-        for (unsigned i = 0; i < numberMessages; ++i) os.write(directMessages[i], directMessagesSizes[i]);
+        for (unsigned i = 0; i < numberMessages; ++i)
+            os.write(directMessages[i], static_cast<streamsize>(directMessagesSizes[i]));
 #else
         os << "] " << SimpleLogger::toStr(static_cast<LogLevel>(loglevel)) << ": " << message;
 #endif
@@ -416,7 +417,7 @@ class RequestRetryReporter
     }
 
 public:
-    void OnTestEnd(const ::testing::TestInfo& info) override
+    void OnTestEnd(const ::testing::TestInfo&) override
     {
         RequestRetryRecorder::instance().report(toStandardOutput);
     }
@@ -614,7 +615,7 @@ int main (int argc, char *argv[])
 
     sdk_test::setTestDataDir(fs::absolute(fs::path(argv[0]).parent_path()));
 
-    SimpleLogger::setLogLevel(logMax);
+    SimpleLogger::setLogLevel(logVerbose);
     SimpleLogger::setOutputClass(&megaLogger);
 
     // delete old test folders, created during previous runs

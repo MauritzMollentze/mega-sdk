@@ -2,17 +2,21 @@
 
 #include <cassert>
 
+#include <mega/common/error_or.h>
 #include <mega/fuse/common/client.h>
 #include <mega/fuse/common/directory_inode.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/file_inode.h>
 #include <mega/fuse/common/file_io_context.h>
+#include <mega/fuse/common/file_move_flag.h>
 #include <mega/fuse/common/file_open_flag.h>
 #include <mega/fuse/common/inode.h>
 #include <mega/fuse/common/inode_id.h>
 #include <mega/fuse/common/inode_info.h>
 #include <mega/fuse/common/logging.h>
+#include <mega/fuse/common/mount_event.h>
+#include <mega/fuse/common/mount_event_type.h>
 #include <mega/fuse/common/mount_inode_id.h>
+#include <mega/fuse/common/mount_result.h>
 #include <mega/fuse/common/service.h>
 #include <mega/fuse/platform/constants.h>
 #include <mega/fuse/platform/directory_context.h>
@@ -31,6 +35,14 @@ namespace fuse
 {
 namespace platform
 {
+
+// For compatibility with libfuse2.
+#ifndef HAS_RENAME_FLAGS
+#define RENAME_EXCHANGE  0
+#define RENAME_NOREPLACE 0
+#endif // !HAS_RENAME_FLAGS
+
+using namespace common;
 
 void Mount::access(Request request,
                    MountInodeID inode,
@@ -166,9 +178,7 @@ void Mount::lookup(Request request,
     request.replyEntry(entry);
 }
 
-void Mount::flush(Request request,
-                  MountInodeID inode,
-                  fuse_file_info& info)
+void Mount::flush(Request request, MountInodeID, fuse_file_info&)
 {
     request.replyOk();
 }
@@ -209,10 +219,7 @@ void Mount::forget_multi(Request request,
     request.replyNone();
 }
 
-void Mount::fsync(Request request,
-                  MountInodeID inode,
-                  bool,
-                  fuse_file_info& info)
+void Mount::fsync(Request request, MountInodeID, bool, fuse_file_info& info)
 {
     // Get our hands on the file's context.
     auto* context = reinterpret_cast<FileContext*>(info.fh);
@@ -411,7 +418,7 @@ void Mount::opendir(Request request,
 }
 
 void Mount::read(Request request,
-                 MountInodeID inode,
+                 MountInodeID,
                  std::size_t size,
                  off_t offset,
                  fuse_file_info& info)
@@ -434,7 +441,7 @@ void Mount::read(Request request,
 }
 
 void Mount::readdir(Request request,
-                    MountInodeID inode,
+                    MountInodeID,
                     std::size_t size,
                     off_t offset,
                     fuse_file_info& info)
@@ -491,9 +498,7 @@ void Mount::readdir(Request request,
     request.replyBuffer(std::move(buffer));
 }
 
-void Mount::release(Request request,
-                    MountInodeID inode,
-                    fuse_file_info& info)
+void Mount::release(Request request, MountInodeID, fuse_file_info& info)
 {
     // Get our hands on the context.
     auto* context = reinterpret_cast<FileContext*>(info.fh);
@@ -526,7 +531,8 @@ void Mount::rename(Request request,
                    MountInodeID sourceParent,
                    const std::string& sourceName,
                    MountInodeID targetParent,
-                   const std::string& targetName)
+                   const std::string& targetName,
+                   unsigned int flags)
 {
     // Get our hands on the parents.
     auto sourceRef = get(sourceParent);
@@ -547,11 +553,26 @@ void Mount::rename(Request request,
     if (!writable())
         return request.replyError(EROFS);
 
+    FileMoveFlags moveFlags = 0;
+
+    // Caller doesn't want to replace any existing file.
+    if ((flags & RENAME_NOREPLACE))
+        moveFlags |= FILE_MOVE_NO_REPLACE;
+
+    // Caller wants to atomically exchange two files.
+    if ((flags & RENAME_EXCHANGE))
+        moveFlags |= FILE_MOVE_EXCHANGE;
+
+    // Make sure only a single flag has been set.
+    if (!valid(moveFlags))
+        return request.replyError(EINVAL);
+
     // Perform the move.
     auto result =
       sourceDirectoryRef->move(sourceName,
                                targetName,
-                               std::move(targetDirectoryRef));
+                               std::move(targetDirectoryRef),
+                               moveFlags);
 
     // Reply to FUSE.
     request.replyError(translate(result));
@@ -759,7 +780,7 @@ void Mount::unlink(Request request,
 }
 
 void Mount::write(Request request,
-                  MountInodeID inode,
+                  MountInodeID,
                   const string& data,
                   off_t offset,
                   fuse_file_info& info)
@@ -788,7 +809,8 @@ void Mount::write(Request request,
 Mount::Mount(const MountInfo& info, MountDB& mountDB)
   : fuse::Mount(info, mountDB)
   , mActivities()
-  , mExecutor(mountDB.executorFlags())
+  , mExecutor(mountDB.executorFlags(), logger())
+  , mPath(info.mPath)
   , mSession(*this)
   , mInvalidator(mSession)
 {
@@ -873,6 +895,11 @@ MountInodeID Mount::map(InodeID id) const
         return MountInodeID(FUSE_ROOT_ID);
 
     return MountInodeID(id);
+}
+
+NormalizedPath Mount::path() const
+{
+    return mPath;
 }
 
 } // platform

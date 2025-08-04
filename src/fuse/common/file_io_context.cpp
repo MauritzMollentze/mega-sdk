@@ -1,32 +1,33 @@
-#include <cassert>
-#include <chrono>
-#include <condition_variable>
-#include <future>
-#include <utility>
-
-#include <mega/fuse/common/bind_handle.h>
+#include <mega/common/error_or.h>
+#include <mega/common/lock.h>
+#include <mega/common/node_info.h>
+#include <mega/common/task_executor.h>
+#include <mega/common/upload.h>
 #include <mega/fuse/common/client.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/file_cache.h>
 #include <mega/fuse/common/file_info.h>
 #include <mega/fuse/common/file_inode.h>
 #include <mega/fuse/common/file_io_context.h>
 #include <mega/fuse/common/inode_db.h>
 #include <mega/fuse/common/inode_info.h>
-#include <mega/fuse/common/lock.h>
-#include <mega/fuse/common/logging.h>
-#include <mega/fuse/common/logging.h>
 #include <mega/fuse/common/logging.h>
 #include <mega/fuse/common/service_flags.h>
-#include <mega/fuse/common/task_executor.h>
-#include <mega/fuse/common/upload.h>
 #include <mega/fuse/platform/mount.h>
 #include <mega/fuse/platform/service_context.h>
 
+#include <cassert>
+#include <chrono>
+#include <condition_variable>
+#include <future>
+#include <utility>
+
 namespace mega
 {
-namespace fuse
+namespace common
 {
+
+using fuse::FileIOContext;
+using fuse::toString;
 
 void LockableTraits<FileIOContext>::acquired(const FileIOContext& context)
 {
@@ -57,6 +58,13 @@ void LockableTraits<FileIOContext>::tryAcquire(const FileIOContext& context)
     FUSEDebugF("Trying to acquire lock on file IO context %s",
                toString(context.id()).c_str());
 }
+
+} // common
+
+namespace fuse
+{
+
+using namespace common;
 
 class FileIOContext::FlushContext
 {
@@ -109,7 +117,7 @@ ErrorOr<FileAccessSharedPtr> FileIOContext::create()
 
     // Couldn't create the file.
     if (!info)
-        return info.error();
+        return unexpected(info.error());
 
     // File's been successfully created.
     mFileInfo = std::move(*info);
@@ -168,7 +176,7 @@ ErrorOr<FileAccessSharedPtr> FileIOContext::download(const Mount& mount)
 
     // File's no longer present under the mount.
     if (!logicalPath)
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Where should we download the file's content?
     auto path = mFileCache.path(extension, id);
@@ -184,7 +192,7 @@ ErrorOr<FileAccessSharedPtr> FileIOContext::download(const Mount& mount)
 
     // Couldn't download the file.
     if (result != API_OK)
-        return result;
+        return unexpected(result);
 
     FileAccessSharedPtr fileAccess;
 
@@ -193,7 +201,7 @@ ErrorOr<FileAccessSharedPtr> FileIOContext::download(const Mount& mount)
 
     // Couldn't retrieve this file's description.
     if (!info)
-        return info.error();
+        return unexpected(info.error());
 
     // File's been successfully downloaded.
     mFileInfo = std::move(*info);
@@ -222,7 +230,7 @@ InodeDB& FileIOContext::inodeDB() const
     return mFileCache.mContext.mInodeDB;
 }
 
-Error FileIOContext::manualFlush(FileIOContextSharedLock& contextLock,
+Error FileIOContext::manualFlush([[maybe_unused]] FileIOContextSharedLock& contextLock,
                                  std::unique_lock<std::mutex>& flushLock,
                                  NodeHandle mountHandle,
                                  LocalPath mountPath)
@@ -366,10 +374,8 @@ void FileIOContext::onPeriodicFlush(FileIOContextRef& context,
         mPeriodicFlushTask.reset();
 }
 
-auto FileIOContext::open(FileIOContextLock& lock,
-                         const Mount& mount,
-                         m_off_t hint)
-  -> ErrorOr<FileAccessSharedPtr>
+auto FileIOContext::open([[maybe_unused]] FileIOContextLock& lock, const Mount& mount, m_off_t hint)
+    -> ErrorOr<FileAccessSharedPtr>
 {
     // Sanity.
     assert(lock.owns_lock());
@@ -400,7 +406,7 @@ auto FileIOContext::open(FileIOContextLock& lock,
 
     // Couldn't open the file.
     if (!fileAccess)
-        return fileAccess.error();
+        return unexpected(fileAccess.error());
 
     // Make file visible to other threads.
     mFileAccess = *fileAccess;
@@ -607,7 +613,7 @@ ErrorOr<std::string> FileIOContext::read(const Mount& mount,
 
     // Couldn't download (or open) the file.
     if (!result)
-        return result.error();
+        return unexpected(result.error());
 
     auto fileAccess = std::move(*result);
         
@@ -636,7 +642,7 @@ ErrorOr<std::string> FileIOContext::read(const Mount& mount,
                            0,
                            offset,
                            FSLogging::logOnError))
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Return result to caller.
     return buffer;
@@ -910,24 +916,25 @@ void FileIOContext::FlushContext::uploaded(ErrorOr<UploadResult> result)
     }
 
     // Extract bind callback and bind handle.
-    auto bind       = std::move(std::get<0>(*result));
-    auto bindHandle = std::move(std::get<1>(*result));
+    auto bind = std::move(*result);
 
     // Sanity.
     assert(bind);
-    assert(bindHandle);
-
-    // Let the cache know which file's associated with this bind handle.
-    auto i = inodeDB().binding(*mContext.mFile, std::move(bindHandle));
 
     // Called when we've bound a name to our uploaded content.
-    auto bound = [i, this](ErrorOr<NodeHandle> result) {
+    auto bound = [this](ErrorOr<NodeHandle> result) {
         // A name's been bound to our content.
         if (result)
-            mContext.mFile->handle(*result);
+        {
+            // Get the file's updated information.
+            auto info = client().get(*result);
 
-        // Let the cache know we're done with the bind handle.
-        inodeDB().bound(*mContext.mFile, i);
+            // Sanity.
+            assert(info.errorOr(API_OK) == API_OK);
+
+            // Update the file's information.
+            mContext.mFile->info(*info);
+        }
 
         // Let waiters know the upload's complete.
         mCV.notify_all();

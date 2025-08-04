@@ -1,24 +1,27 @@
 #include <cassert>
 
-#include <mega/fuse/common/any_lock_set.h>
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/any_lock.h>
+#include <mega/fuse/common/any_lock_set.h>
 #include <mega/fuse/common/client.h>
 #include <mega/fuse/common/directory_inode.h>
-#include <mega/fuse/common/error_or.h>
+#include <mega/fuse/common/inode.h>
 #include <mega/fuse/common/inode_badge.h>
 #include <mega/fuse/common/inode_cache.h>
 #include <mega/fuse/common/inode_db.h>
 #include <mega/fuse/common/inode_info.h>
-#include <mega/fuse/common/inode.h>
 #include <mega/fuse/common/logging.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/ref.h>
 #include <mega/fuse/platform/mount.h>
 
 namespace mega
 {
-namespace fuse
+namespace common
 {
+
+using fuse::Inode;
+using fuse::toString;
 
 void LockableTraits<Inode>::acquiring(const Inode& inode)
 {
@@ -48,7 +51,14 @@ void LockableTraits<Inode>::tryAcquire(const Inode& inode)
                toString(inode.id()).c_str());
 }
 
-void Inode::moved(InodeDBLock& lock,
+} // common
+
+namespace fuse
+{
+
+using namespace common;
+
+void Inode::moved([[maybe_unused]] InodeDBLock& lock,
                   const std::string& name,
                   NodeHandle parentHandle)
 {
@@ -267,14 +277,14 @@ ErrorOr<LocalPath> Inode::path(InodeID parentID) const
 
         // We've hit the cloud root.
         if (!info.mParentID)
-            return API_ENOENT;
+            return unexpected(API_ENOENT);
 
         // Retrieve a reference to this inode's parent.
         auto ref = mInodeDB.get(info.mParentID);
 
         // Couldn't get a reference to this inode's parent.
         if (!ref)
-            return API_ENOENT;
+            return unexpected(API_ENOENT);
 
         // Retrieve the parent's description.
         info = ref->info();

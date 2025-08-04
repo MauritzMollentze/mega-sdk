@@ -47,9 +47,9 @@ uint32_t GetMediaInfoVersion()
         unsigned column = 1;
         for (size_t i = s.size(); i--; )
         {
-            if (is_digit(s[i]))
+            if (is_digit(static_cast<unsigned>(s[i])))
             {
-                version += column * (s[i] - '0');
+                version += column * static_cast<uint32_t>(s[i] - '0');
                 column *= 10;
             }
             else if (s[i] == 'v')
@@ -154,22 +154,24 @@ static void ReadShortFormats(std::vector<MediaFileInfo::MediaCodecs::shortformat
     bool working = json.enterarray();
     if (working)
     {
-        while ((working = json.enterarray()))
+        working = json.enterarray();
+        while (working)
         {
             MediaFileInfo::MediaCodecs::shortformatrec rec;
-            unsigned id = atoi(json.getvalue());
+            unsigned id = static_cast<unsigned>(atoi(json.getvalue()));
             assert(id < 256);
             std::string a, b, c;
             working = json.storeobject(&a) && json.storeobject(&b) && json.storeobject(&c);
             if (working)
             {
                 rec.shortformatid = byte(id);
-                rec.containerid = atoi(a.c_str());
-                rec.videocodecid = atoi(b.c_str());
-                rec.audiocodecid = atoi(c.c_str());
+                rec.containerid = static_cast<unsigned>(atoi(a.c_str()));
+                rec.videocodecid = static_cast<unsigned>(atoi(b.c_str()));
+                rec.audiocodecid = static_cast<unsigned>(atoi(c.c_str()));
                 vec.push_back(rec);
             }
             json.leavearray();
+            working = json.enterarray();
         }
         json.leavearray();
     }
@@ -193,7 +195,7 @@ void MediaFileInfo::onCodecMappingsReceipt(MegaClient* client, JSON& json, int c
     {
         LOG_debug << "Media codec mappings correctly received";
 
-        downloadedCodecMapsVersion = codecListVersion;
+        downloadedCodecMapsVersion = static_cast<uint32_t>(codecListVersion);
         assert(downloadedCodecMapsVersion < 10000);
         json.enterarray();
         ReadIdRecords(mediaCodecs.containers, json);
@@ -548,38 +550,39 @@ MediaProperties MediaProperties::decodeMediaPropertiesAttributes(const std::stri
     if (ppo && pos + 3 + 11 <= (int)attrs.size())
     {
         std::string binary;
-        Base64::atob(attrs.substr(pos + 3, 11), binary);
+        Base64::atob(attrs.substr(static_cast<size_t>(pos + 3), 11), binary);
         assert(binary.size() == 8);
         byte v[8];
         memcpy(v, binary.data(), std::min<size_t>(sizeof v, binary.size()));
         xxteaDecrypt((uint32_t*)v, sizeof(v)/4, fakey);
 
-        r.width = (v[0] >> 1) + ((v[1] & 127) << 7);
+        r.width = static_cast<uint32_t>((v[0] >> 1) + ((v[1] & 127) << 7));
         if (v[0] & 1) r.width = (r.width << 3) + 16384;
 
-        r.height = v[2] + ((v[3] & 63) << 8);
+        r.height = static_cast<uint32_t>(v[2] + ((v[3] & 63) << 8));
         if (v[1] & 128) r.height = (r.height << 3) + 16384;
 
-        r.fps = (v[3] >> 7) + ((v[4] & 63) << 1);
+        r.fps = static_cast<uint32_t>((v[3] >> 7) + ((v[4] & 63) << 1));
         if (v[3] & 64) r.fps = (r.fps << 3) + 128;
 
-        r.playtime = (v[4] >> 7) + (v[5] << 1) + (v[6] << 9);
+        r.playtime = static_cast<uint32_t>((v[4] >> 7) + (v[5] << 1) + (v[6] << 9));
         if (v[4] & 64) r.playtime = r.playtime * 60 + 131100;
 
-        if (!(r.shortformat = v[7]))
+        r.shortformat = v[7];
+        if (!r.shortformat)
         {
-            int ppo = Node::hasfileattribute(&attrs, fa_mediaext);
-            int pos = ppo - 1;
+            ppo = Node::hasfileattribute(&attrs, fa_mediaext);
+            pos = ppo - 1;
             if (ppo && pos + 3 + 11 <= (int)attrs.size())
             {
-                Base64::atob(attrs.substr(pos + 3, 11), binary);
+                Base64::atob(attrs.substr(static_cast<size_t>(pos + 3), 11), binary);
                 assert(binary.size() == 8);
                 memcpy(v, binary.data(), std::min<size_t>(sizeof v, binary.size()));
                 xxteaDecrypt((uint32_t*)v, sizeof(v) / 4, fakey);
 
                 r.containerid = v[0];
-                r.videocodecid = v[1] + ((v[2] & 15) << 8);
-                r.audiocodecid = (v[2] >> 4) + (v[3] << 4);
+                r.videocodecid = static_cast<uint32_t>(v[1] + ((v[2] & 15) << 8));
+                r.audiocodecid = static_cast<uint32_t>((v[2] >> 4) + (v[3] << 4));
             }
         }
     }
@@ -607,7 +610,9 @@ const char* MediaProperties::supportedformatsMediaInfoAudio()
 
 bool MediaProperties::isMediaFilenameExtAudio(const std::string& ext)
 {
-    for (const char* ptr = supportedformatsMediaInfoAudio(); (ptr = strstr(ptr, ext.c_str())); ptr += ext.size())
+    for (const char* ptr = supportedformatsMediaInfoAudio();
+         (ptr = strstr(ptr, ext.c_str())) != nullptr;
+         ptr += ext.size())
     {
         if (ptr[ext.size()] == '.')
         {
@@ -747,7 +752,7 @@ bool mediaInfoOpenFileWithLimits(MediaInfoLib::MediaInfo& mi, LocalPath& filenam
 
     m_off_t filesize = fa->size;
     size_t totalBytesRead = 0;
-    mi.Open_Buffer_Init(filesize, 0);
+    mi.Open_Buffer_Init(static_cast<ZenLib::int64u>(filesize), 0);
     m_off_t readpos = 0;
     m_time_t startTime = 0;
 
@@ -814,11 +819,12 @@ bool mediaInfoOpenFileWithLimits(MediaInfoLib::MediaInfo& mi, LocalPath& filenam
             }
         }
 
-        m_off_t requestPos = mi.Open_Buffer_Continue_GoTo_Get();
+        m_off_t requestPos = static_cast<m_off_t>(mi.Open_Buffer_Continue_GoTo_Get());
         if (requestPos != (m_off_t)-1)
         {
             readpos = requestPos;
-            mi.Open_Buffer_Init(filesize, readpos);
+            mi.Open_Buffer_Init(static_cast<ZenLib::int64u>(filesize),
+                                static_cast<ZenLib::int64u>(readpos));
         }
     }
 

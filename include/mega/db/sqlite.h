@@ -27,6 +27,8 @@
 
 #include "mega/db.h"
 
+#include <filesystem>
+#include <optional>
 #include <sqlite3.h>
 
 namespace mega {
@@ -58,10 +60,11 @@ public:
     void remove() override;
 
     SqliteDbTable(PrnGen &rng, sqlite3*, FileSystemAccess &fsAccess, const LocalPath &path, const bool checkAlwaysTransacted, DBErrorCallback dBErrorCallBack);
-    virtual ~SqliteDbTable();
+    ~SqliteDbTable() override;
 
-    bool inTransaction() const override;
-
+private:
+    // whether an unmatched begin() has been issued
+    bool inTransaction() const;
 };
 
 /**
@@ -82,9 +85,29 @@ public:
     bool getChildren(const mega::NodeSearchFilter& filter, int order, std::vector<std::pair<NodeHandle, NodeSerialized>>& children, CancelToken cancelFlag, const NodeSearchPage& page) override;
     bool searchNodes(const mega::NodeSearchFilter& filter, int order, std::vector<std::pair<NodeHandle, NodeSerialized>>& nodes, CancelToken cancelFlag, const NodeSearchPage& page) override;
 
-    bool getAllNodeTags(const std::string& searchString,
-                        std::set<std::string>& tags,
-                        CancelToken cancelFlag) override;
+    /*
+     * @brief
+     * Get all node tags below a specified node.
+     *
+     * @param cancelToken
+     * A token that can be used to terminate the query's execution prematurely.
+     *
+     * @param handle
+     * A handle specifying which node we want to list tags below.
+     *
+     * If undefined, the query will list tags below all root nodes.
+     *
+     * @param pattern
+     * An optional pattern that can be used to filter which tags we list.
+     *
+     * @returns
+     * std::nullopt on failure.
+     * std::set<std::string> on success.
+     */
+    auto getNodeTagsBelow(CancelToken cancelToken,
+                          NodeHandle handle,
+                          const std::string& pattern = "")
+        -> std::optional<std::set<std::string>> override;
 
     bool getNodesByFingerprint(const std::string& fingerprint, std::vector<std::pair<NodeHandle, NodeSerialized>>& nodes) override;
     bool getNodeByFingerprint(const std::string& fingerprint,
@@ -103,6 +126,7 @@ public:
     uint64_t getNumberOfChildrenByType(NodeHandle parentHandle, nodetype_t nodeType) override;
 
     bool put(Node* node) override;
+    using SqliteDbTable::put; // for the other virtual overload
     bool remove(mega::NodeHandle nodehandle) override;
     bool removeNodes() override;
 
@@ -141,10 +165,6 @@ private:
     // Allow at least the following containers:
     bool processSqlQueryNodes(sqlite3_stmt *stmt, std::vector<std::pair<mega::NodeHandle, mega::NodeSerialized>>& nodes);
 
-    bool processSqlQueryAllNodeTags(sqlite3_stmt* stmt,
-                                    std::set<std::string>& tags,
-                                    std::function<bool(const std::string&)> isValidTagF);
-
     // if add a new sqlite3_stmt update finalise()
     sqlite3_stmt* mStmtPutNode = nullptr;
     sqlite3_stmt* mStmtUpdateNode = nullptr;
@@ -158,8 +178,7 @@ private:
     sqlite3_stmt* mStmtNumChildren = nullptr;
     std::map<size_t, sqlite3_stmt*> mStmtGetChildren;
     std::map<size_t, sqlite3_stmt*> mStmtSearchNodes;
-    sqlite3_stmt* mStmtAllNodeTags = nullptr;
-
+    sqlite3_stmt* mStmtNodeTagsBelow = nullptr;
     sqlite3_stmt* mStmtNodesByFp = nullptr;
     sqlite3_stmt* mStmtNodeByFp = nullptr;
     sqlite3_stmt* mStmtNodeByOrigFp = nullptr;
@@ -198,11 +217,21 @@ public:
 
     bool probe(FileSystemAccess& fsAccess, const string& name) const override;
 
+    std::optional<std::filesystem::path> getExistingDbPath(const FileSystemAccess& fsAccess,
+                                                           const std::string& fname) const override;
+
     const LocalPath& rootPath() const override;
 
+    bool renameDBFiles(FileSystemAccess& fsAccess,
+                       const LocalPath& legacyPath,
+                       const LocalPath& dbPath) override;
+
 private:
-    bool openDBAndCreateStatecache(sqlite3 **db, FileSystemAccess& fsAccess, const string& name, mega::LocalPath &dbPath, const int flags);
-    bool renameDBFiles(mega::FileSystemAccess& fsAccess, mega::LocalPath& legacyPath, mega::LocalPath& dbPath);
+    bool openDBAndCreateStatecache(sqlite3** db,
+                                   FileSystemAccess& fsAccess,
+                                   const string& name,
+                                   mega::LocalPath& dbPath,
+                                   const int flags);
     void removeDBFiles(mega::FileSystemAccess& fsAccess, mega::LocalPath& dbPath);
 
     // We should add new type for every new column that was added to DB

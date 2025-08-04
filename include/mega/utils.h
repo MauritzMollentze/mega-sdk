@@ -21,14 +21,15 @@
 
 #ifndef MEGA_UTILS_H
 #define MEGA_UTILS_H 1
+#include "types.h"
 
-#include <type_traits>
+#include <algorithm>
+#include <charconv>
 #include <condition_variable>
-#include <thread>
 #include <mutex>
 #include <shared_mutex>
-
-#include "types.h"
+#include <thread>
+#include <type_traits>
 #undef SSIZE_MAX
 #include "mega/mega_utf8proc.h"
 #undef SSIZE_MAX
@@ -37,21 +38,12 @@
 #include <unicode/uchar.h>
 
 namespace mega {
-// convert 1...8 character ID to int64 integer (endian agnostic)
-#define MAKENAMEID1(a) (nameid)(a)
-#define MAKENAMEID2(a, b) (nameid)(((a) << 8) + (b))
-#define MAKENAMEID3(a, b, c) (nameid)(((a) << 16) + ((b) << 8) + (c))
-#define MAKENAMEID4(a, b, c, d) (nameid)(((a) << 24) + ((b) << 16) + ((c) << 8) + (d))
-#define MAKENAMEID5(a, b, c, d, e) (nameid)((((uint64_t)a) << 32) + ((b) << 24) + ((c) << 16) + ((d) << 8) + (e))
-#define MAKENAMEID6(a, b, c, d, e, f) (nameid)((((uint64_t)a) << 40) + (((uint64_t)b) << 32) + ((c) << 24) + ((d) << 16) + ((e) << 8) + (f))
-#define MAKENAMEID7(a, b, c, d, e, f, g) (nameid)((((uint64_t)a) << 48) + (((uint64_t)b) << 40) + (((uint64_t)c) << 32) + ((d) << 24) + ((e) << 16) + ((f) << 8) + (g))
-#define MAKENAMEID8(a, b, c, d, e, f, g, h) (nameid)((((uint64_t)a) << 56) + (((uint64_t)b) << 48) + (((uint64_t)c) << 40) + (((uint64_t)d) << 32) + ((e) << 24) + ((f) << 16) + ((g) << 8) + (h))
-
 std::string toNodeHandle(handle nodeHandle);
 std::string toNodeHandle(NodeHandle nodeHandle);
 NodeHandle toNodeHandle(const byte* data);  // consider moving functionality to NodeHandle
 NodeHandle toNodeHandle(const std::string* data);
 std::string toHandle(handle h);
+handle stringToHandle(const std::string& b64String, const int handleSize);
 std::pair<bool, TypeOfLink> toTypeOfLink (nodetype_t type);
 #define LOG_NODEHANDLE(x) toNodeHandle(x)
 #define LOG_HANDLE(x) toHandle(x)
@@ -265,95 +257,6 @@ std::string winErrorMessage(DWORD error);
 
 #endif
 
-struct MEGA_API TLVstore
-{
-private:
-    TLV_map tlv;
-
- public:
-
-    /**
-     * @brief containerToTLVrecords Builds a TLV object with records from an encrypted container
-     * @param data Binary byte array representing the encrypted container
-     * @param key Master key to decrypt the container
-     * @return A new TLVstore object. You take the ownership of the object.
-     */
-    static TLVstore * containerToTLVrecords(const string *data, SymmCipher *key);
-
-    /**
-     * @brief Builds a TLV object with records from a container
-     * @param data Binary byte array representing the TLV records
-     * @return A new TLVstore object. You take the ownership of the object.
-     */
-    static TLVstore * containerToTLVrecords(const string *data);
-
-    /**
-     * @brief Converts the TLV records into an encrypted byte array
-     * @param key Master key to decrypt the container
-     * @param encSetting Block encryption mode to be used by AES
-     * @return A new string holding the encrypted byte array. You take the ownership of the string.
-     */
-    string *tlvRecordsToContainer(PrnGen &rng, SymmCipher *key, encryptionsetting_t encSetting = AES_GCM_12_16);
-
-    /**
-     * @brief Converts the TLV records into a byte array
-     * @return A new string holding the byte array. You take the ownership of the string.
-     */
-    string *tlvRecordsToContainer();
-
-    /**
-     * @brief get Get the value for a given key
-     *
-     * In case the type is found, it will update value parameter and return true.
-     * In case the type is not found, it will return false and value will not be changed.
-     *
-     * @param type Type of the value (without scope nor non-historic modifiers).
-     * @param value Set to corresponding value if type was found.
-     * @return True if type was found, false otherwise.
-     */
-    bool get(string type, string& value) const;
-
-    /**
-     * @brief Get a reference to the TLV_map associated to this TLVstore
-     *
-     * The TLVstore object retains the ownership of the returned object. It will be
-     * valid until this TLVstore object is deleted.
-     *
-     * @return The TLV_map associated to this TLVstore
-     */
-    const TLV_map *getMap() const;
-
-    /**
-     * @brief Get a list of the keys contained in the TLV
-     *
-     * You take ownership of the returned value.
-     *
-     * @return A new vector with the keys included in the TLV
-     */
-    vector<string> *getKeys() const;
-
-    /**
-     * @brief add Adds a new record to the container
-     * @param type Type for the new value (without scope nor non-historic modifiers).
-     * @param value New value to be set.
-     */
-    void set(string type, string value);
-
-    /**
-     * @brief Removes a record from the container
-     * @param type Type for the value to be removed (without scope nor non-historic modifiers).
-     */
-    void reset(string type);
-
-    size_t size();
-
-    static unsigned getTaglen(int mode);
-    static unsigned getIvlen(int mode);
-    static encryptionmode_t getMode(int mode);
-
-    ~TLVstore();
-};
-
 class Utils {
 public:
     /**
@@ -416,7 +319,7 @@ public:
         return data32;
     }
 
-    static std::string stringToHex(const std::string& input);
+    static std::string stringToHex(const std::string& input, bool spaceBetweenBytes = false);
     static std::string hexToString(const std::string& input);
     /**
      * @brief Converts a hexadecimal string to a uint64_t value. The input string may or may not have the hex prefix "0x".
@@ -448,6 +351,12 @@ public:
     static string toLowerUtf8(const string& text);
 
     // Platform-independent case-insensitive comparison.
+    static int icasecmp(const std::string& lhs, const std::string& rhs);
+    static int icasecmp(const char* lhs, const char* rhs);
+
+    static int icasecmp(const std::wstring& lhs, const std::wstring& rhs);
+    static int icasecmp(const wchar_t* lhs, const wchar_t* rhs);
+
     static int icasecmp(const std::string& lhs,
                         const std::string& rhs,
                         const size_t length);
@@ -474,8 +383,26 @@ public:
 
     // join({"a", "new", "loom"}, "; ") -> "a; new; loom"
     static std::string join(const std::vector<std::string>& items, const std::string& with);
-    static bool startswith(const std::string& str, const std::string& start);
-    static bool startswith(const std::string& str, char chr);
+    template<typename T>
+    static bool startswith(const std::basic_string<T>& str, const std::basic_string<T>& start);
+
+    template<typename T>
+    static bool startswith(const std::basic_string<T>& str, T chr)
+    {
+        return str.length() >= 1 && chr == str.front();
+    }
+
+    template<typename T>
+    static const T* startswith(const T* str, const T* start);
+
+    template<typename T>
+    static const T* startswith(const std::basic_string<T>& str, const T* start)
+    {
+        return startswith(str.c_str(), start);
+    }
+
+    template<typename T>
+    static bool endswith(const T* str, size_t strLen, const T* suffix, size_t suffixLen);
     static bool endswith(const std::string& str, char chr);
     static const std::string _trimDefaultChars;
     // return string with trimchrs removed from front and back of given string str
@@ -490,6 +417,8 @@ public:
     static std::string getenv(const std::string& key, const std::string& def);
     static void setenv(const std::string& key, const std::string& value);
     static void unsetenv(const std::string& key);
+
+    static std::string getIcuVersion();
 };
 
 extern m_time_t m_time(m_time_t* tt = NULL);
@@ -552,8 +481,7 @@ class chunkmac_map
     // this is the map key for how far that collapsing has progressed
     m_off_t macsmacSoFarPos = -1;
 
-    m_off_t progresscontiguous = 0;
-
+    m_off_t progresscontiguous{0};
 
 public:
     int64_t macsmac(SymmCipher *cipher);
@@ -569,11 +497,14 @@ public:
     m_off_t updateContiguousProgress(m_off_t fileSize);
     void updateMacsmacProgress(SymmCipher *cipher);
     void copyEntriesTo(chunkmac_map& other);
+    m_off_t copyEntriesToUntilRaidlineBeforePos(m_off_t maxPos, chunkmac_map& other);
     void copyEntryTo(m_off_t pos, chunkmac_map& other);
     void debugLogOuputMacs();
 
     void ctr_encrypt(m_off_t chunkid, SymmCipher *cipher, byte *chunkstart, unsigned chunksize, m_off_t startpos, int64_t ctriv, bool finishesChunk);
     void ctr_decrypt(m_off_t chunkid, SymmCipher *cipher, byte *chunkstart, unsigned chunksize, m_off_t startpos, int64_t ctriv, bool finishesChunk);
+    void setProgressContiguous(const m_off_t p);
+    void swap(chunkmac_map& other);
 
     size_t size() const
     {
@@ -583,12 +514,7 @@ public:
     {
         mMacMap.clear();
         macsmacSoFarPos = -1;
-        progresscontiguous = 0;
-    }
-    void swap(chunkmac_map& other) {
-        mMacMap.swap(other.mMacMap);
-        std::swap(macsmacSoFarPos, other.macsmacSoFarPos);
-        std::swap(progresscontiguous, other.progresscontiguous);
+        setProgressContiguous(0);
     }
 };
 
@@ -601,6 +527,7 @@ struct CacheableWriter
     void serializecstr(const char* field, bool storeNull);  // may store the '\0' also for backward compatibility. Only use for utf8!  (std::string storing double byte chars will only store 1 byte)
     void serializepstr(const string* field);  // uses string size() not strlen
     void serializestring(const string& field);
+    void serializestring(const std::wstring& field);
     void serializestring_u32(const string& field); // use uint32_t for the size field
     void serializecompressedu64(uint64_t field);
     void serializecompressedi64(int64_t field) { serializecompressedu64(static_cast<uint64_t>(field)); }
@@ -636,6 +563,7 @@ struct CacheableReader
 
     bool unserializebinary(byte* data, size_t len);
     bool unserializecstr(string& s, bool removeNull); // set removeNull if this field stores the terminating '\0' at the end
+    bool unserializestring(std::wstring& s);
     bool unserializestring(string& s);
     bool unserializestring_u32(string& s);
     bool unserializecompressedu64(uint64_t& field);
@@ -770,6 +698,13 @@ public:
         return mNotifications.size();
     }
 
+    std::deque<T> popAll()
+    {
+        std::lock_guard<std::mutex> g(m);
+        std::deque<T> batch;
+        batch.swap(mNotifications);
+        return batch;
+    }
 };
 
 template<class K, class V>
@@ -1228,7 +1163,9 @@ private:
     static bool isOnlyWildCards(const std::string& text);
 };
 
-std::set<std::string>::iterator getTagPosition(std::set<std::string>& tokens, const std::string& tag);
+std::set<std::string>::iterator getTagPosition(std::set<std::string>& tokens,
+                                               const std::string& pattern,
+                                               const bool stripAccents = true);
 
 /*
  * Compare two UTF-8 strings for equality where the first string is
@@ -1237,12 +1174,14 @@ std::set<std::string>::iterator getTagPosition(std::set<std::string>& tokens, co
  * @param pattern the like pattern
  * @param str the UFT-8 string to compare against
  * @param esc the escape character
+ * @param stripAccents True if accents should be stripped before comparison.
  *
  * @return true if the are the same and false if they are different
  */
 bool likeCompare(const char* pattern,
                  const char* str,
-                 const UChar32 esc = static_cast<UChar32>(ESCAPE_CHARACTER));
+                 const UChar32 esc = static_cast<UChar32>(ESCAPE_CHARACTER),
+                 const bool stripAccents = true);
 
 // Get the current process ID
 unsigned long getCurrentPid();
@@ -1259,12 +1198,23 @@ struct IsStringType<std::wstring> : std::true_type { };
 
 // Retrieve a file's extension.
 template<typename StringType>
-auto extensionOf(const StringType& path, std::string& extension)
-  -> typename std::enable_if<IsStringType<StringType>::value, bool>::type;
+auto extensionOf(const StringType& path, std::string& extension) ->
+    typename std::enable_if<IsStringType<StringType>::value, bool>::type;
 
 template<typename StringType>
-auto extensionOf(const StringType& path)
-  -> typename std::enable_if<IsStringType<StringType>::value, std::string>::type;
+auto extensionOf(const StringType& path) ->
+    typename std::enable_if<IsStringType<StringType>::value, std::string>::type;
+
+/**
+ * @brief Remove the dot for a string beginning with '.'
+ */
+template<typename StringType>
+StringType removeDot(StringType&& s)
+{
+    if (!s.empty() && s.front() == '.')
+        s.erase(0, 1);
+    return s;
+}
 
 // Translate a character representing a hexadecimal digit to an integer.
 template<typename T>
@@ -1505,6 +1455,257 @@ private:
     std::string mPosMsg;
     std::chrono::time_point<std::chrono::steady_clock> mStartTime; // Fixed time_point type
 };
+
+/**
+ * @brief Returns std::this_thread:get_id() converted to a string
+ */
+std::string getThisThreadIdStr();
+
+/**
+ * @brief Converts a number of any arithmetic type to its string representation.
+ *
+ * @tparam T The type of the number to be converted. It must be an arithmetic type (e.g., int,
+ * float, double).
+ *
+ * @param number The number to be converted to a string.
+ * @return A `std::string` representing the number. If conversion fails or the type is not
+ * arithmetic, an empty string is returned.
+ *
+ * @note This function only supports arithmetic types. The function will return an empty string if
+ * the number cannot be successfully converted.
+ */
+template<typename T>
+std::string numberToString(T number)
+{
+    static_assert(std::is_arithmetic_v<T>, "invalid numeric type");
+
+    char buffer[64];
+    if (auto [ptr, ec] = std::to_chars(buffer, buffer + sizeof(buffer), number); ec == std::errc())
+    {
+        return std::string(buffer, ptr);
+    }
+
+    return {};
+}
+
+/**
+ * @brief Converts an string to a number of any aritmetic type.
+ *
+ * @tparam T The type of the number to be converted to. It must be an arithmetic type (e.g., int,
+ * float, double).
+ *
+ * @param sv The string to be converted to a number
+ * @return The numeric value contained in a std::optional<T>. std::nullpopt if the conversion fails.
+ */
+template<typename T>
+std::optional<T> stringToNumber(const std::string_view sv)
+{
+    static_assert(std::is_arithmetic_v<T>, "invalid numeric type");
+    T r;
+    if (std::from_chars(sv.data(), sv.data() + sv.size(), r).ec == std::errc())
+        return r;
+    return std::nullopt;
+}
+
+/**
+ * @brief helper type for std::visit
+ *
+ * @example Usage example (see https://en.cppreference.com/w/cpp/utility/variant/visit):
+ *   std::visit(overloaded{
+ *          [](auto arg) { std::cout << arg << ' '; },
+ *          [](double arg) { std::cout << std::fixed << arg << ' '; },
+ *          [](const std::string& arg) { std::cout << std::quoted(arg) << ' '; }
+ *      }, v);
+ */
+template<class... Ts>
+struct overloaded: Ts...
+{
+    using Ts::operator()...;
+};
+
+// explicit deduction guide (not needed as of C++20)
+template<class... Ts>
+overloaded(Ts...) -> overloaded<Ts...>;
+
+/**
+ * @brief Represents a range of unsigned integers, providing an iterator-based interface for
+ * iteration.
+ *
+ * The Range class allows to create a range of unsigned integers, which can be used in
+ * for-each loops or other iteration contexts.
+ *
+ * The range is of type [start, end), i.e., "start" is inclusive, "end" is exclusive.
+ * 'start' should be smaller than 'end'. Otherwise the 'start' value will be truncated to the 'end'
+ * value, resulting in an empty Range.
+ */
+class Range
+{
+public:
+    Range(const unsigned start, const unsigned end):
+        mStart(start),
+        mEnd(end)
+    {
+        if (mStart > mEnd)
+        {
+            mStart = mEnd;
+        }
+    }
+
+    class Iterator
+    {
+    public:
+        using value_type = unsigned;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const unsigned*;
+        using reference = const unsigned&;
+        using iterator_category = std::input_iterator_tag;
+
+        explicit Iterator(const unsigned current):
+            mCurrent(current)
+        {}
+
+        unsigned operator*() const
+        {
+            return mCurrent;
+        }
+
+        Iterator& operator++()
+        {
+            ++mCurrent;
+            return *this;
+        }
+
+        bool operator!=(const Iterator& other) const
+        {
+            return mCurrent != other.mCurrent;
+        }
+
+    private:
+        unsigned mCurrent;
+    };
+
+    Iterator begin() const
+    {
+        return Iterator(mStart);
+    }
+
+    Iterator end() const
+    {
+        return Iterator(mEnd);
+    }
+
+    size_t size() const
+    {
+        return mEnd - mStart;
+    }
+
+    bool empty() const
+    {
+        return !size();
+    }
+
+private:
+    unsigned mStart;
+    unsigned mEnd;
+};
+
+/**
+ * @brief Generates a Range object from a starting value to an ending value.
+ *
+ * This function provides a convenient way to create a Range without directly constructing it.
+ *
+ * Example:
+ * @code
+ * for (const auto i : range(2, 6)) // Iterates over 2, 3, 4, 5
+ * {
+ *     std::cout << i << "\n";
+ * }
+ * @endcode
+ *
+ * @param start The starting value of the range (inclusive).
+ * @param end The ending value of the range (exclusive). Expected to be greater than 'start'.
+ * Otherwise the returned Range will start from 'end' (i.e., empty Range).
+ * @return A Range object representing the specified range.
+ */
+inline Range range(const unsigned start, const unsigned end)
+{
+    return Range(start, end);
+}
+
+/**
+ * @brief Overload of range() that generates a Range from 0 to the specified ending value.
+ *
+ * Example:
+ * @code
+ * for (const auto i : range(5)) // Iterates over 0, 1, 2, 3, 4
+ * {
+ *     std::cout << i << "\n";
+ * }
+ * @endcode
+ *
+ * @param end The ending value of the range (exclusive).
+ * @return A Range object representing the range from 0 to end.
+ */
+template<typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+inline Range range(const T end)
+{
+    if constexpr (std::is_signed_v<T>)
+    {
+        if (end <= 0)
+        {
+            return range(0u);
+        }
+    }
+    return range(0u, static_cast<unsigned>(end));
+}
+
+/**
+ * @brief Returns std::nullopt if opt is negative, std::optional<T>{opt} otherwise
+ */
+template<typename T>
+constexpr std::optional<T> convertIfPositive(const int opt)
+{
+    return opt < 0 ? std::nullopt : std::optional<T>{opt};
+}
+
+inline std::optional<std::string> charPtrToStrOpt(const char* s)
+{
+    return s ? std::optional{s} : std::nullopt;
+}
+
+inline std::optional<std::string_view> charPtrToStrViewOpt(const char* s)
+{
+    return s ? std::optional{s} : std::nullopt;
+}
+
+template<typename T>
+T* getPtr(std::optional<T>& opt) noexcept
+{
+    return opt.has_value() ? std::addressof(opt.value()) : nullptr;
+}
+
+template<typename T>
+const T* getPtr(const std::optional<T>& opt) noexcept
+{
+    return opt.has_value() ? std::addressof(opt.value()) : nullptr;
+}
+
+inline const char* getConstCharPtr(const std::optional<std::string>& opt)
+{
+    return opt.has_value() ? opt->c_str() : nullptr;
+}
+
+inline bool isAllDigits(const std::string_view s)
+{
+    return std::all_of(begin(s),
+                       end(s),
+                       [](const auto c)
+                       {
+                           return std::isdigit(c);
+                       });
+}
+
+storagestatus_t getStorageStatusFromString(const std::string& storageStateStr);
 
 } // namespace mega
 

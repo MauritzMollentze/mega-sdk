@@ -1,11 +1,11 @@
 #include <fstream>
 
-#include <mega/fuse/common/error_or.h>
-#include <mega/fuse/common/mount_event_type.h>
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/mount_event.h>
+#include <mega/fuse/common/mount_event_type.h>
 #include <mega/fuse/common/mount_info.h>
 #include <mega/fuse/common/mount_result.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/testing/client.h>
 #include <mega/fuse/common/testing/cloud_path.h>
 #include <mega/fuse/common/testing/file.h>
@@ -23,6 +23,8 @@ namespace fuse
 {
 namespace testing
 {
+
+using namespace common;
 
 struct FUSECommonTests
   : TestBase
@@ -252,6 +254,26 @@ TEST_F(FUSECommonTests, cloud_replace)
     EXPECT_EQ(fsidOf(MountPathW() / "sfx"), handle->as8byte());
 }
 
+TEST_F(FUSECommonTests, duplicate_names)
+{
+    // Add a few duplicate directories.
+    ASSERT_EQ(ClientW()->makeDirectory("sd0", "/x/s").errorOr(API_OK), API_OK);
+    ASSERT_EQ(ClientW()->makeDirectory("sd0", "/x/s").errorOr(API_OK), API_OK);
+
+    // Sanity.
+    EXPECT_EQ(ClientW()->childNames("/x/s").count("sd0"), 0u);
+
+    // Wait for the directory to become inaccessible.
+    std::error_code error;
+
+    EXPECT_TRUE(waitFor([&]() {
+        return !fs::exists(MountPathW() / "sd0", error);
+    }, mDefaultTimeout));
+
+    EXPECT_FALSE(fs::exists(MountPathW() / "sd0", error));
+    EXPECT_FALSE(error);
+}
+
 TEST_F(FUSECommonTests, file_cache_load)
 {
     // Create a new client so not to interfere with later tests.
@@ -265,7 +287,7 @@ TEST_F(FUSECommonTests, file_cache_load)
     MountInfo mount;
 
     mount.mHandle = client->handle("/x/s");
-    mount.mFlags.mName = "s";
+    mount.name("s");
     mount.mFlags.mPersistent = true;
     mount.mPath = client->storagePath() / "s";
 
@@ -274,7 +296,7 @@ TEST_F(FUSECommonTests, file_cache_load)
     ASSERT_EQ(client->addMount(mount), MOUNT_SUCCESS);
 
     // Enable the mount.
-    ASSERT_EQ(client->enableMount(mount.mPath, false), MOUNT_SUCCESS);
+    ASSERT_EQ(client->enableMount(mount.name(), false), MOUNT_SUCCESS);
 
     // Create a new file.
     auto sfxData = randomBytes(32);
@@ -295,7 +317,7 @@ TEST_F(FUSECommonTests, file_cache_load)
     auto observer = client->mountEventObserver();
 
     observer->expect({
-        mount.mPath,
+        mount.name(),
         MOUNT_SUCCESS,
         MOUNT_DISABLED
     });
@@ -312,7 +334,7 @@ TEST_F(FUSECommonTests, file_cache_load)
     }
 
     // Re-enable the mount.
-    ASSERT_EQ(client->enableMount(mount.mPath, false), MOUNT_SUCCESS);
+    ASSERT_EQ(client->enableMount(mount.name(), false), MOUNT_SUCCESS);
 
     // Try and read the file's data back.
     ASSERT_EQ(readFile(sfxPath), sfxData);
@@ -328,7 +350,7 @@ TEST_F(FUSECommonTests, file_cache_load)
 
     // Disable the mount.
     observer->expect({
-        mount.mPath,
+        mount.name(),
         MOUNT_SUCCESS,
         MOUNT_DISABLED
     });
@@ -354,7 +376,7 @@ TEST_F(FUSECommonTests, reload)
     MountInfo mount;
 
     mount.mHandle = client->handle("/x/s");
-    mount.mFlags.mName = "s";
+    mount.name("s");
     mount.mPath = client->storagePath() / "s";
 
     UNIX_ONLY(ASSERT_TRUE(fs::create_directories(Path(mount.mPath))));
@@ -362,7 +384,7 @@ TEST_F(FUSECommonTests, reload)
     ASSERT_EQ(client->addMount(mount), MOUNT_SUCCESS);
 
     // Enable the mount.
-    ASSERT_EQ(client->enableMount(mount.mPath, false), MOUNT_SUCCESS);
+    ASSERT_EQ(client->enableMount(mount.name(), false), MOUNT_SUCCESS);
 
     // Bring a few inodes into memory.
 
@@ -393,7 +415,7 @@ TEST_F(FUSECommonTests, reload)
     ASSERT_EQ(client->remove("/x/s/sd1"), API_OK);
 
     // Add sd2.
-    ASSERT_EQ(client->makeDirectory("sd2", "/x/s").error(), API_OK);
+    ASSERT_EQ(client->makeDirectory("sd2", "/x/s").errorOr(API_OK), API_OK);
 
     // Move sf0 to sdx/sf0.
     ASSERT_EQ(client->move("sf0", "/x/s/sf0", "/x/s/sdx"), API_OK);
@@ -404,7 +426,7 @@ TEST_F(FUSECommonTests, reload)
         File sf2("sf2", "sf2", mScratchPath);
 
         // Upload the file.
-        ASSERT_EQ(client->upload("/x/s", sf2.path()).error(), API_OK);
+        ASSERT_EQ(client->upload("/x/s", sf2.path()).errorOr(API_OK), API_OK);
     }
 
     // Simulate ETOOMANY by reloading the cloud tree.
@@ -470,24 +492,24 @@ TEST_F(FUSECommonTests, share_changes_permissions)
         if (!error)
             return status.permissions();
 
-        return API_EREAD;
+        return unexpected(API_EREAD);
     }; // permissions
 
     // Verify initial permissions are as we expect.
     auto perms = permissions(MountPathRS() / "sd0");
-    ASSERT_EQ(perms.error(), API_OK);
+    ASSERT_EQ(perms.errorOr(API_OK), API_OK);
     EXPECT_EQ(perms.value(), U_RX);
 
     perms = permissions(MountPathRS() / "sf0");
-    ASSERT_EQ(perms.error(), API_OK);
+    ASSERT_EQ(perms.errorOr(API_OK), API_OK);
     EXPECT_EQ(perms.value(), U_R);
 
     perms = permissions(MountPathWS() / "sd0");
-    ASSERT_EQ(perms.error(), API_OK);
+    ASSERT_EQ(perms.errorOr(API_OK), API_OK);
     EXPECT_EQ(perms.value(), U_RWX);
 
     perms = permissions(MountPathWS() / "sf0");
-    ASSERT_EQ(perms.error(), API_OK);
+    ASSERT_EQ(perms.errorOr(API_OK), API_OK);
     EXPECT_EQ(perms.value(), U_RW);
 
     // Change permissions of shares.
@@ -655,7 +677,7 @@ std::string readFile(const Path& path)
     if (!istream)
         return std::string();
 
-    std::string buffer(size, '\0');
+    std::string buffer(static_cast<std::size_t>(size), '\0');
 
     istream.read(&buffer[0], static_cast<std::streamsize>(size));
 

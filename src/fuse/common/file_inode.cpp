@@ -1,9 +1,10 @@
 #include <cassert>
 
-#include <mega/fuse/common/badge.h>
+#include <mega/common/badge.h>
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/client.h>
 #include <mega/fuse/common/directory_inode.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/file_cache.h>
 #include <mega/fuse/common/file_info.h>
 #include <mega/fuse/common/file_inode.h>
@@ -13,7 +14,6 @@
 #include <mega/fuse/common/inode_db.h>
 #include <mega/fuse/common/inode_info.h>
 #include <mega/fuse/common/logging.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/ref.h>
 #include <mega/fuse/platform/file_context.h>
 
@@ -22,7 +22,9 @@ namespace mega
 namespace fuse
 {
 
-void FileInode::remove(RefBadge badge, InodeDBLock lock)
+using namespace common;
+
+void FileInode::remove(RefBadge, InodeDBLock lock)
 {
     // Remove this file from the inode database.
     mInodeDB.remove(*this, std::move(lock));
@@ -260,9 +262,7 @@ void FileInode::modified(bool modified)
     mInodeDB.modified(id(), modified);
 }
 
-Error FileInode::move(InodeBadge badge,
-                      const std::string& name,
-                      DirectoryInodeRef parent)
+Error FileInode::move(InodeBadge, const std::string& name, DirectoryInodeRef parent)
 {
     // Sanity.
     assert(parent);
@@ -281,7 +281,7 @@ ErrorOr<platform::FileContextPtr> FileInode::open(Mount& mount,
 
     // File's read-only.
     if (writable && permissions() != FULL)
-        return API_FUSE_EROFS;
+        return unexpected(API_FUSE_EROFS);
 
     // Get a reference to ourself.
     auto ref = FileInodeRef(this);
@@ -300,7 +300,7 @@ ErrorOr<platform::FileContextPtr> FileInode::open(Mount& mount,
 
     // Couldn't open the file.
     if (result != API_OK)
-        return result;
+        return unexpected(result);
 
     // File's open.
     return std::make_unique<platform::FileContext>(std::move(context),
@@ -308,7 +308,7 @@ ErrorOr<platform::FileContextPtr> FileInode::open(Mount& mount,
                                               flags);
 }
 
-Error FileInode::replace(InodeBadge badge,
+Error FileInode::replace(InodeBadge,
                          InodeRef other,
                          const std::string& otherName,
                          DirectoryInodeRef otherParent)

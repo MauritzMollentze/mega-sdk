@@ -32,18 +32,19 @@ namespace mega {
 // bitmap graphics processor
 class GfxProviderExternal : public IGfxLocalProvider
 {
-    MegaGfxProcessor *processor;
+    MegaGfxProcessor* processor{};
 
     bool readbitmap(const LocalPath&, int) override;
-    bool resizebitmap(int, int, string* result) override;
+    bool resizebitmap(int rw, int rh, std::string* imageOut, Hint hint) override;
     void freebitmap() override;
 
     const char* supportedformats() override;
     const char* supportedvideoformats() override;
 public:
-    GfxProviderExternal() : processor(nullptr) { };
-    GfxProviderExternal(MegaGfxProcessor *processor) : processor(processor) {};
-    void setProcessor(MegaGfxProcessor *processor);
+    GfxProviderExternal() = default;
+    GfxProviderExternal(MegaGfxProcessor* gfxProcessor):
+        processor(gfxProcessor){};
+    void setProcessor(MegaGfxProcessor* gfxProcessor);
 };
 } // namespace
 

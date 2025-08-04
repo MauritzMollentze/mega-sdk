@@ -21,25 +21,38 @@ target_sources(test_unit
     FileFingerprint_test.cpp
     File_test.cpp
     FsNode.cpp
+    hashcash_test.cpp
     Logging_test.cpp
     MediaProperties_test.cpp
     MegaApi_test.cpp
+    NodesMatchedByFsid_test.cpp
     name_collision_test.cpp
     PayCrypter_test.cpp
     PendingContactRequest_test.cpp
+    proxy_test.cpp
     Scoped_timer_test.cpp
     Serialization_test.cpp
     Share_test.cpp
     Sync_conflict_test.cpp
     Sync_test.cpp
+    SyncUploadThrottling_test.cpp
     TextChat_test.cpp
     Transfer_test.cpp
+    Transferstats_test.cpp
     User_test.cpp
     user_attributes_test.cpp
+    impl/share_test.cpp
     utils.cpp
     utils_test.cpp
+    utils_optional_test.cpp
     pwm_file_parser_test.cpp
     pwm_import_validation.cpp
+    LRUCache_test.cpp
+    totp_test.cpp
+    localpath_test.cpp
+    shared_mutex_tests.cpp
+    uripath_test.cpp
+    Sqlite_test.cpp
 )
 
 target_sources_conditional(test_unit
@@ -59,7 +72,7 @@ target_link_libraries(test_unit PRIVATE MEGA::test_tools MEGA::test_common)
 target_platform_compile_options(
     TARGET test_unit
     WINDOWS /we4800 # Implicit conversion from 'type' to bool. Possible information loss
-    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion -Wno-unused-parameter
+    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion
 )
 
 if(ENABLE_SDKLIB_WERROR)
@@ -67,7 +80,5 @@ if(ENABLE_SDKLIB_WERROR)
         TARGET test_unit
         WINDOWS /WX
         UNIX  $<$<CONFIG:Debug>: -Werror>
-        APPLE $<$<CONFIG:Debug>: -Wno-sign-conversion -Wno-overloaded-virtual -Wno-inconsistent-missing-override
-                                 -Wno-unqualified-std-cast-call>
     )
 endif()

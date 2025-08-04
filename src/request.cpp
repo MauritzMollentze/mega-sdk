@@ -57,9 +57,9 @@ string Request::get(MegaClient* client, char reqidCounter[10], string& idempoten
         for (int i = 0; i < (int)cmds.size(); i++)
         {
             req.append(i ? ",{" : "{");
-            req.append(cmds[i]->getJSON(client));
+            req.append(cmds[static_cast<size_t>(i)]->getJSON(client));
             req.append("}");
-            ++counts[cmds[i]->commandStr];
+            ++counts[cmds[static_cast<size_t>(i)]->commandStr];
         }
 
         req.append("]");
@@ -92,24 +92,24 @@ string Request::get(MegaClient* client, char reqidCounter[10], string& idempoten
     return cachedJSON;
 }
 
-bool Request::processCmdJSON(Command* cmd, bool couldBeError, JSON& json)
+bool Request::processCmdJSON(Command* cmd, bool couldBeError, JSON& jsonResponse)
 {
     Error e;
-    if (couldBeError && cmd->checkError(e, json))
+    if (couldBeError && cmd->checkError(e, jsonResponse))
     {
-        return cmd->procresult(Command::Result(Command::CmdError, e), json);
+        return cmd->procresult(Command::Result(Command::CmdError, e), jsonResponse);
     }
-    else if (json.enterobject())
+    else if (jsonResponse.enterobject())
     {
-        return cmd->procresult(Command::CmdObject, json) && json.leaveobject();
+        return cmd->procresult(Command::CmdObject, jsonResponse) && jsonResponse.leaveobject();
     }
-    else if (json.enterarray())
+    else if (jsonResponse.enterarray())
     {
-        return cmd->procresult(Command::CmdArray, json) && json.leavearray();
+        return cmd->procresult(Command::CmdArray, jsonResponse) && jsonResponse.leavearray();
     }
     else
     {
-        return cmd->procresult(Command::CmdItem, json);
+        return cmd->procresult(Command::CmdItem, jsonResponse);
     }
 }
 
@@ -325,7 +325,7 @@ Command* Request::getCurrentCommand()
     return cmds[processindex].get();
 }
 
-void Request::serverresponse(std::string&& movestring, MegaClient* client)
+void Request::serverresponse(std::string&& movestring, MegaClient*)
 {
     assert(processindex == 0);
     jsonresponse = std::move(movestring);

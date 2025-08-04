@@ -1,7 +1,7 @@
-#include <mega/fuse/common/error_or.h>
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/logging.h>
 #include <mega/fuse/common/mount_info.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/testing/cloud_path.h>
 #include <mega/fuse/common/testing/directory.h>
 #include <mega/fuse/common/testing/model.h>
@@ -46,10 +46,10 @@ Error Test::regenerate(Client& client,
         auto created = client.makeDirectory("x", "/");
 
         // Make sure the test root was created.
-        EXPECT_EQ(created.error(), API_OK);
+        EXPECT_EQ(created.errorOr(API_OK), API_OK);
 
         // Couldn't create test root.
-        if (created.error() != API_OK)
+        if (!created)
             return created.error();
 
         // Latch the test root's handle.
@@ -90,10 +90,10 @@ Error Test::regenerate(Client& client,
     auto uploaded = client.upload("/x", directory.path() / "s");
 
     // Make sure content was uploaded.
-    EXPECT_EQ(uploaded.error(), API_OK);
+    EXPECT_EQ(uploaded.errorOr(API_OK), API_OK);
 
     // Couldn't upload cloud content.
-    if (uploaded.error() != API_OK)
+    if (!uploaded)
         return uploaded.error();
 
     // Wait until our friend sees our new content.

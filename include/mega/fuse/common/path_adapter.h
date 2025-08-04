@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <string>
 
+#include <mega/common/type_traits.h>
 #include <mega/fuse/common/path_adapter_forward.h>
-#include <mega/fuse/common/type_traits.h>
 
 #include <mega/filesystem.h>
 
@@ -126,7 +126,7 @@ public:
     }
 
     // Translate component into a cloud-friendly form.
-    const std::string toName(const FileSystemAccess& fsAccess) const
+    const std::string toName(const FileSystemAccess&) const
     {
         // Return transcoded path to caller.
         return TraitsType::toUTF8(mPath, mLength);

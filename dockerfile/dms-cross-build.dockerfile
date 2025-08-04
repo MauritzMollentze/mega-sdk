@@ -1,7 +1,7 @@
 # Dockerfile for cross-compiling for DMS in its different architectures.
 #
 # Build the Docker image:
-#   docker build -t dms-build-env -f /path/to/your/sdk/dockerfile/dms-cross-build.dockerfile /path/to/your/sdk/dockerfile/ --build-arg ARCH=architechtureName
+#   docker build -t dms-build-env -f /path/to/your/sdk/dockerfile/dms-cross-build.dockerfile /path/to/your/sdk/dockerfile/ --build-arg PLATFORM=platformName
 #     -t : Tags the built container with a name
 #     -f : Specify dockerfile to be build, replace /path/to/your/sdk with your local path to the sdk
 #     --build-arg : adds an argument to the build, you should select one of the possible architectures
@@ -11,14 +11,14 @@
 #     -v : Mounts a local directory into the container, replace /path/to/your/sdk and /path/to/your/vcpkg with your local paths
 #     -it : Starts an interactive terminal session inside the container after the cmake project is configured and build
 #
-#     Possible architechtures are: [alpine alpine4k apollolake armada37xx armada38x avoton broadwell broadwellnk broadwellnkv2 broadwellntbap bromolow braswell denverton epyc7002 geminilake grantley kvmcloud kvmx64 monaco purley r1000 rtd1296 rtd1619b v1000]
+#     Possible platforms are: [alpine alpine4k apollolake armada37xx armada38x avoton broadwell broadwellnk broadwellnkv2 broadwellntbap bromolow braswell denverton epyc7002 geminilake grantley kvmx64 monaco purley r1000 rtd1296 rtd1619b v1000]
 
 # Base image
 FROM ubuntu:22.04
 
 # Set default architecture
-ARG ARCH=alpine
-ENV ARCH=${ARCH}
+ARG PLATFORM=alpine
+ENV PLATFORM=${PLATFORM}
 
 # Install dependencies
 RUN apt-get --quiet=2 update && DEBCONF_NOWARNINGS=yes apt-get --quiet=2 install \
@@ -30,6 +30,7 @@ RUN apt-get --quiet=2 update && DEBCONF_NOWARNINGS=yes apt-get --quiet=2 install
     curl \
     fakeroot \
     git \
+    libtool \
     nasm \
     pkg-config \
     python3 \
@@ -40,8 +41,16 @@ RUN apt-get --quiet=2 update && DEBCONF_NOWARNINGS=yes apt-get --quiet=2 install
     zip \
     1> /dev/null
 
+# Install AWS CLI v2
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+unzip awscliv2.zip && \
+./aws/install && \
+rm -rf awscliv2.zip aws
+
 # Set up work directory
 WORKDIR /mega
+
+RUN chmod 777 /mega
 
 # Clone and checkout known pkgscripts baseline
 RUN git clone https://github.com/SynologyOpenSource/pkgscripts-ng.git pkgscripts \
@@ -54,18 +63,26 @@ COPY dms-toolchains.conf /mega/
 # Make the helper shell script executable
 RUN chmod +x /mega/dms-toolchain.sh
 
-# Run the shell script to set up the environment
-RUN bash -c '/mega/dms-toolchain.sh ${ARCH}'
-
 # Configure and build CMake command
 CMD ["sh", "-c", "\
+    owner_uid=$(stat -c '%u' /mega/sdk) && \
+    owner_gid=$(stat -c '%g' /mega/sdk) && \
+    groupadd -g $owner_gid me && \
+    echo 'Adding \"me\" user...' && \
+    useradd -r -M -u $owner_uid -g $owner_gid -d /mega -s /bin/bash me && \
+    export PLATFORM=${PLATFORM} && \
+    su - me -w 'PLATFORM,VCPKG_BINARY_SOURCES,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_ENDPOINT_URL' -c ' \
+    /mega/dms-toolchain.sh ${PLATFORM} && \
     cmake -B buildDMS -S sdk \
-        -DVCPKG_ROOT=/mega/vcpkg \
-        -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DENABLE_LOG_PERFORMANCE=ON \
         -DENABLE_SDKLIB_EXAMPLES=OFF \
         -DENABLE_SDKLIB_TESTS=OFF \
-        -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=/mega/${ARCH}.toolchain.cmake \
+        -DENABLE_SDKLIB_WERROR=OFF \
+        -DUSE_LIBUV=ON \
+        -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=/mega/${PLATFORM}.toolchain.cmake \
         -DVCPKG_OVERLAY_TRIPLETS=/mega \
-        -DVCPKG_TARGET_TRIPLET=${ARCH} && \
-    cmake --build buildDMS && \
+        -DVCPKG_ROOT=/mega/vcpkg \
+        -DVCPKG_TARGET_TRIPLET=${PLATFORM} && \
+    cmake --build buildDMS' && \
     exec /bin/bash"]

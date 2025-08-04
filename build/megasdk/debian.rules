@@ -1,13 +1,15 @@
 #!/usr/bin/make -f
 NJOBS := $(shell echo ${DEB_BUILD_OPTIONS} | sed -rn 's/.*parallel=([0-9]*).*/\1/p')
 VCPKG_ROOT := $(shell [ -f /opt/vcpkg.tar.gz ] && echo "-DVCPKG_ROOT=vcpkg" || echo "")
-DPKGXZ := $(shell cat /etc/issue | grep "Ubuntu 24\|Oracular Oriole\|Ubuntu 23\|Ubuntu 22\|Ubuntu 21" >/dev/null && echo "-- -Zxz" || echo "")
-#TODO: Ensure raspbian builds with that export
-EXPORTCCMFPU := $(shell cat /etc/issue | grep "Raspbian GNU/Linux 12" >/dev/null && echo "export CC='cc -mfpu=vfp'" || echo ":")
+DPKGXZ := $(shell cat /etc/issue | grep "Ubuntu 25\|Plucky Puffin\|Ubuntu 24\|Ubuntu 23\|Ubuntu 22\|Ubuntu 21" >/dev/null && echo "-- -Zxz" || echo "")
+EXPORT_VCPKG_FORCE_SYSTEM_BINARIES := $(shell uname -m | grep "armv7l" >/dev/null && echo "VCPKG_FORCE_SYSTEM_BINARIES=1" || echo "")
 export VCPKG_DEFAULT_BINARY_CACHE := $(shell [ -f /opt/vcpkg.tar.gz ] && echo "/opt/persistent/vcpkg_cache" || echo "")
 export PATH := $(shell [ -f /opt/cmake.tar.gz ] && echo "`pwd`/cmake_inst/bin:${PATH}" || echo "${PATH}")
 
 MEGA_BUILD_ID := $(shell cat MEGA_BUILD_ID || echo "1")
+
+QTINSTALL := $(shell cat /etc/issue | grep "Ubuntu 20.04" >/dev/null && echo "-DCMAKE_PREFIX_PATH=/opt/mega" || echo "")
+QTDEFINES := $(shell [ -f /opt/mega/bin/qmake ] && echo "${QTINSTALL}" || echo "" )
 
 build: build-stamp
 build-stamp:
@@ -18,14 +20,14 @@ build-stamp:
 		mkdir -p $(VCPKG_DEFAULT_BINARY_CACHE); \
 	fi
 
-	if [ -f /opt/cmake.tar.gz ]; then echo "8dc99be7ba94ad6e14256b049e396b40  /opt/cmake.tar.gz" | md5sum -c -; fi
+	if [ -f /opt/cmake.tar.gz ]; then echo "ebc26503469f12bf1e956c564fcfa82a  /opt/cmake.tar.gz" | md5sum -c -; fi
 	if [ -f /opt/cmake.tar.gz ]; then     \
 		tar xzf /opt/cmake.tar.gz;        \
-		ln -s cmake-*-Linux* cmake_inst;  \
+		ln -s cmake-*-linux* cmake_inst;  \
 	fi
 
 	cmake --version
-	cmake $(VCPKG_ROOT) -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -S $(CURDIR) -B $(CURDIR)/build_dir
+	$(EXPORT_VCPKG_FORCE_SYSTEM_BINARIES) cmake $(VCPKG_ROOT) -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_QT_BINDINGS=ON -DENABLE_LOG_PERFORMANCE=ON -DUSE_LIBUV=ON $(QTDEFINES) -S $(CURDIR) -B $(CURDIR)/build_dir
 	cmake --build $(CURDIR)/build_dir -j$(NJOBS)
 	cmake --install $(CURDIR)/build_dir --prefix $(CURDIR)/install_dir
 	
@@ -38,7 +40,7 @@ clean:
 
 install: build
 	dh_auto_install --destdir=debian/megasdk -- INSTALL_ROOT=$(CURDIR)/debian/megasdk
-	dh_install install_dir/* /
+#	dh_install install_dir/* /
 	
 # Build architecture-independent files here.
 binary-indep: build install

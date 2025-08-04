@@ -23,11 +23,13 @@
 #ifndef MEGA_NODE_H
 #define MEGA_NODE_H 1
 
-#include "filefingerprint.h"
-#include "file.h"
 #include "attrmap.h"
-#include "syncfilter.h"
 #include "backofftimer.h"
+#include "file.h"
+#include "filefingerprint.h"
+#include "syncfilter.h"
+#include "syncinternals/syncuploadthrottlingfile.h"
+
 #include <bitset>
 
 namespace mega {
@@ -128,7 +130,7 @@ struct NodeCounter
     NodeCounter() = default;
 };
 
-typedef std::multiset<FileFingerprint*, FileFingerprintCmp> fingerprint_set;
+typedef std::multiset<const FileFingerprint*, FileFingerprintCmp> fingerprint_set;
 typedef fingerprint_set::iterator FingerprintPosition;
 
 
@@ -204,10 +206,16 @@ private:
     std::unique_ptr<std::list<Command*>> chain;
 };
 
-
 // filesystem node
 struct MEGA_API Node : public NodeCore, FileFingerprint
 {
+    // Define what shouldn't be logged
+    enum LogCondition : uint32_t
+    {
+        LOG_CONDITION_NONE = 0, // NONE: all is logged
+        LOG_CONDITION_DISABLE_NO_KEY = 1 // NO KEY is not logged
+    };
+
     static const std::string BLANK;
     static const std::string CRYPTO_ERROR;
     static const std::string NO_KEY;
@@ -260,7 +268,7 @@ struct MEGA_API Node : public NodeCore, FileFingerprint
     void setattr();
 
     // display name (UTF-8)
-    const char* displayname() const;
+    const char* displayname(LogCondition log = LOG_CONDITION_NONE) const;
 
     // check if the name matches (UTF-8)
     bool hasName(const string&) const;
@@ -385,7 +393,7 @@ struct MEGA_API Node : public NodeCore, FileFingerprint
     NodePosition mNodePosition;
 
     // check if node is below this node
-    bool isbelow(Node*) const;
+    bool isbelow(const Node*) const;
     bool isbelow(NodeHandle) const;
 
     // handle of public link for the node
@@ -401,7 +409,47 @@ struct MEGA_API Node : public NodeCore, FileFingerprint
 
     int getShareType() const;
 
-    bool isAncestor(NodeHandle ancestorHandle) const;
+    using nodeCondition_t = std::function<bool(const Node& node)>;
+
+    /**
+     * @brief Check if any of the ancestors of this node matches the give condition
+     *
+     * @param condition The condition to check on every ancestor.
+     * @return Returns true if any of the ancestors of this node evaluates to true the given
+     * condition, false otherwise.
+     */
+    bool hasAncestorMatching(const nodeCondition_t& condition) const;
+
+    /**
+     * @brief Same as hasAncestorMatching but evaluates also the condition on this node.
+     */
+    bool matchesOrHasAncestorMatching(const nodeCondition_t& condition) const
+    {
+        return condition(*this) || hasAncestorMatching(condition);
+    }
+
+    /**
+     * @brief Check if any of the ancestors of this node has the given handle
+     *
+     * @param ancestorHandle The handle that is expected to match.
+     * @return Returns true if any of the ancestors of this node has the given ancestorHandle
+     */
+    bool isAncestor(const NodeHandle ancestorHandle) const
+    {
+        return hasAncestorMatching(
+            [ancestorHandle](const Node& node)
+            {
+                return node.nodeHandle() == ancestorHandle;
+            });
+    }
+
+    /**
+     * @brief Returns true if this node has the given nodeHandle or any of its ancestors have it.
+     */
+    bool hasNHOrHasAncestorWithNH(const NodeHandle nh) const
+    {
+        return nodeHandle() == nh || isAncestor(nh);
+    }
 
     // true for outshares, pending outshares and folder links (which are shared folders internally)
     bool isShared() const { return  (outshares && !outshares->empty()) || (pendingshares && !pendingshares->empty()); }
@@ -457,8 +505,10 @@ struct MEGA_API Node : public NodeCore, FileFingerprint
 
     bool isPhotoWithFileAttributes(bool checkPreview) const;
 
+    bool isCreditCardNode() const;
     bool isPasswordNode() const;
-    bool isPasswordNodeFolder() const;
+    bool isPasswordManagerNode() const;
+    bool isPasswordManagerNodeFolder() const;
 
 private:
     // full folder/file key, symmetrically or asymmetrically encrypted
@@ -614,6 +664,10 @@ struct MEGA_API LocalNodeCore
 
     // The fingerprint of the node and/or file we are synced with
     FileFingerprint syncedFingerprint;
+    // The fingreprint scanned from file system
+    // In Android scannedFingerprint is modified to set proper mtime value (from download)
+    // (it isn't possible set mtime in file system)
+    FileFingerprint realScannedFingerprint;
 
     // FILENODE or FOLDERNODE
     nodetype_t type = TYPE_UNKNOWN;
@@ -670,6 +724,10 @@ struct MEGA_API LocalNode
     unsigned expectedSelfNotificationCount = 0;
     //dstime lastScanTime = 0;
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4201) // nameless struct
+#endif
     struct
     {
         // Already-synced syncs on startup should not re-fingerprint files that match the synced fingerprint by fsid/size/mtime
@@ -737,6 +795,9 @@ struct MEGA_API LocalNode
         // eg. Synology SMB network drive from windows, and filenames with trailing spaces
         unsigned localFSCannotStoreThisName : 1;
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     // Fields which are hardly ever used.
     // We keep the average memory use by only alloating these when used.
@@ -854,9 +915,45 @@ struct MEGA_API LocalNode
     // use this one to skip the hasRare check, if it doesn't exist a reference to a blank one is returned
     const RareFields& rareRO() const;
 
-    // set the syncupTargetedAction for this, and parents
+    /**
+     * @brief Marks the node and optionally its relatives for scanning again.
+     *
+     * This method sets the scanning flag on the current node, its parent, and/or its descendants,
+     * indicating that they need to be scanned for filesystem changes during the next
+     * synchronization cycle. Optionally, you can specify a delay before the scan occurs.
+     *
+     * @param doParent If `true`, marks the parent node for scanning.
+     * @param doHere If `true`, marks the current node for scanning.
+     * @param doBelow If `true`, marks all descendant nodes for scanning.
+     * @param delayds The delay in deciseconds before the scan should occur. If zero, the scan is
+     * addressed in the next syncLoop iteration.
+     */
     void setScanAgain(bool doParent, bool doHere, bool doBelow, dstime delayds);
+
+    /**
+     * @brief Marks the node and optionally its relatives to recheck for moved or renamed items.
+     *
+     * This method sets the move checking flag on the current node, its parent, and/or its
+     * descendants, indicating that they need to be rechecked for any moves or renames within the
+     * synchronization scope.
+     *
+     * @param doParent If `true`, marks the parent node for move checking.
+     * @param doHere If `true`, marks the current node for move checking.
+     * @param doBelow If `true`, marks all descendant nodes for move checking.
+     */
     void setCheckMovesAgain(bool doParent, bool doHere, bool doBelow);
+
+    /**
+     * @brief Marks the node and optionally its relatives to be resynchronized.
+     *
+     * This method sets the synchronization flag on the current node, its parent, and/or its
+     * descendants, indicating that they need to be synchronized with the remote server during the
+     * next syncLoop iteration.
+     *
+     * @param doParent If `true`, marks the parent node for synchronization.
+     * @param doHere If `true`, marks the current node for synchronization.
+     * @param doBelow If `true`, marks all descendant nodes for synchronization.
+     */
     void setSyncAgain(bool doParent, bool doHere, bool doBelow);
 
     void setContainsConflicts(bool doParent, bool doHere, bool doBelow);
@@ -913,13 +1010,73 @@ struct MEGA_API LocalNode
 
     // Each LocalNode can be either uploading or downloading a file.
     // These functions manage that
-    void queueClientUpload(shared_ptr<SyncUpload_inClient> upload, VersioningOption vo, bool queueFirst, NodeHandle ovHandleIfShortcut);
+
+    /**
+     * @brief Queues an upload task for processing, with throttling support.
+     *
+     * This method resets the transferSP shared pointer to the new SyncUpload_inClient, checks
+     * throttling conditions, and queues the upload for processing. If throttling is required, the
+     * upload is added to a global delayed queue owned by Syncs. Otherwise, the upload is sent to
+     * the client to be processed immediately.
+     *
+     * @param upload Shared pointer to the upload task being processed.
+     * @param vo Versioning option for the upload.
+     * @param queueFirst Flag indicating if this upload should be prioritized. This is meant for the
+     * queue client, not for the delayed queue. In case the upload is added to the delayed queue,
+     * this param will be taken into account when sending it to the client.
+     * @param ovHandleIfShortcut The origin version handle (source cloudNode) used if we find a
+     * target node to clone.
+     * @return True if the upload was queued for immediate processing, false if it was added to the
+     * throttling delayed queue.
+     */
+    bool queueClientUpload(shared_ptr<SyncUpload_inClient> upload,
+                           const VersioningOption vo,
+                           const bool queueFirst,
+                           const NodeHandle ovHandleIfShortcut);
     void queueClientDownload(shared_ptr<SyncDownload_inClient> upload, bool queueFirst);
     void resetTransfer(shared_ptr<SyncTransfer_inClient> p);
     void checkTransferCompleted(SyncRow& row, SyncRow& parentRow, SyncPath& fullPath);
     void updateTransferLocalname();
-    bool transferResetUnlessMatched(direction_t, const FileFingerprint& fingerprint);
+
+    /**
+     * @brief Determines whether a transfer associated with the local node should be reset,
+     *        based on transfer direction, fingerprint match and transfer state.
+     *
+     * This method checks if the current transfer matches the provided direction and fingerprint.
+     * If not, the transfer is reset. Transfers that have been terminated (e.g., due to errors)
+     * are only retried if they are retryable and unmatched. In case they are terminated with
+     * specific errors (not retryable) the transfer must not be retried unless unmatched: the node
+     * could have been replaced remotely (new version).
+     *
+     * @param dir The transfer direction (PUT for uploads or GET for downloads).
+     * @param fingerprint The fingerprint of the file to match against the current transfer.
+     *
+     * @return This method returns false only if there is a failure or fingerprint mismatch but
+     * putnodes was started, to reevaluate the row (trigger a new upload). For all the other
+     * scenarios, it returns true.
+     *
+     * @details
+     * - If there is no associated transfer (`!transferSP`), the method returns true.
+     * - Checks if the current transfer's direction matches the given direction (`dir`) and
+     *   if the fingerprint matches the provided fingerprint. If both match, the transfer
+     *   remains active unless it was terminated and retryable.
+     * - For upload transfers, additional throttling checks are performed using
+     *   UploadThrottlingFile::handleAbortUpload(). If the upload must not be canceled,
+     *   the method returns false.
+     *
+     * @todo Improve accuracy of the matching criteria, considering additional factors beyond
+     * fingerprints.
+     */
+    bool transferResetUnlessMatched(const direction_t, const FileFingerprint& fingerprint);
+
     shared_ptr<SyncTransfer_inClient> transferSP;
+
+    /**
+     * @brief Check if this node or any successors have any pending transfer (transferSP != nullptr)
+     *
+     * @return true if there are pending transfers, false otherwise
+     */
+    bool hasPendingTransfers() const;
 
     void updateMoveInvolvement();
 
@@ -956,6 +1113,10 @@ struct MEGA_API LocalNode
     void setSubtreeNeedsRefingerprint();
 
 private:
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4201) // nameless struct
+#endif
     struct
     {
         // The node's exclusion state.
@@ -967,9 +1128,14 @@ private:
         // Whether we need to reload this node's ignore file.
         bool mWaitingForIgnoreFileLoad : 1;
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     // Query whether a file is excluded by a name filter.
-    ExclusionState calcExcluded(RemotePathPair namePath, nodetype_t type, bool inherited) const;
+    ExclusionState calcExcluded(RemotePathPair namePath,
+                                nodetype_t applicableType,
+                                bool inherited) const;
 
     // Query whether a file is excluded by a size filter.
     ExclusionState calcExcluded(const RemotePathPair& namePath, m_off_t size) const;
@@ -999,7 +1165,9 @@ public:
     exclusionState(const PathType& path, nodetype_t type, m_off_t size) const;
 
     // Specialization of above intended for cloud name queries.
-    ExclusionState exclusionState(const string& name, nodetype_t type, m_off_t size) const;
+    ExclusionState exclusionState(const string& name,
+                                  nodetype_t applicableType,
+                                  m_off_t size) const;
 
     // Query this node's exclusion state.
     ExclusionState exclusionState() const;
@@ -1039,6 +1207,46 @@ private:
 public:
     WatchHandle mWatchHandle;
 #endif // USE_INOTIFY
+
+private:
+    /**
+     * @brief Member containing the state and operations for UploadThrottlingFile.
+     */
+    UploadThrottlingFile mUploadThrottling;
+
+public:
+    /**
+     * @brief Sets the mUploadThrottling flag to bypass throttling.
+     *
+     * @param maxUploadsBeforeThrottle Maximum number of allowed uploads before the next upload must
+     * be throttled.
+     *
+     * @see UploadThrottlingFile
+     */
+    void bypassThrottlingNextTime(const unsigned maxUploadsBeforeThrottle)
+    {
+        mUploadThrottling.bypassThrottlingNextTime(maxUploadsBeforeThrottle);
+    }
+
+    /**
+     * @brief Increases the upload counter by 1.
+     *
+     * @see UploadThrottlingFile
+     */
+    void increaseUploadCounter()
+    {
+        mUploadThrottling.increaseUploadCounter();
+    }
+
+    /**
+     * @brief Gets the upload counter.
+     *
+     * @see UploadThrottlingFile
+     */
+    unsigned uploadCounter() const
+    {
+        return mUploadThrottling.uploadCounter();
+    }
 };
 
 bool isDoNotSyncFileName(const string& name);

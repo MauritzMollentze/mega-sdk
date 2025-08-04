@@ -37,7 +37,11 @@
 #import "MEGABackupInfo+init.h"
 #import "MEGAVPNCredentials.h"
 #import "MEGAVPNCredentials+init.h"
+#import "MEGAVPNRegion.h"
+#import "MEGAVPNRegion+init.h"
+#import "MEGANetworkConnectivityTestResults+init.h"
 #import "MEGANotificationList+init.h"
+#import "MEGAIntegerList+init.h"
 
 using namespace mega;
 
@@ -233,6 +237,28 @@ using namespace mega;
     return [dict copy];
 }
 
+- (nullable NSDictionary<NSString *, MEGAIntegerList *> *)megaStringIntegerDictionary {
+    if (!self.megaRequest) {
+        return nil;
+    }
+    MegaStringIntegerMap *map = self.megaRequest->getMegaStringIntegerMap();
+
+    NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithCapacity:map->size()];
+    MegaStringList *keyList = map->getKeys();
+
+    for (int i = 0; i < keyList->size(); i++) {
+        const char *key = keyList->get(i);
+        MegaIntegerList* errorCode = map->get(key);
+        MEGAIntegerList* value = errorCode != nil ?
+            [[MEGAIntegerList alloc] initWithMegaIntegerList:errorCode cMemoryOwn:YES] :
+            nil;
+        dict[@(key)] = value;
+    }
+
+    delete keyList;
+    return [dict copy];
+}
+
 - (NSInteger)transferTag {
     return self.megaRequest ? self.megaRequest->getTransferTag() : 0;
 }
@@ -337,6 +363,30 @@ using namespace mega;
 
 - (nullable MEGAVPNCredentials *)megaVpnCredentials {
     return self.megaRequest ? [[MEGAVPNCredentials alloc] initWithMegaVpnCredentials:self.megaRequest->getMegaVpnCredentials()->copy() cMemoryOwn:YES] : nil;
+}
+
+- (nullable MEGANetworkConnectivityTestResults *)megaNetworkConnectivityTestResults {
+    return self.megaRequest ? [[MEGANetworkConnectivityTestResults alloc] initWithMegaNetworkConnectivityTestResults:self.megaRequest->getMegaNetworkConnectivityTestResults()->copy() cMemoryOwn:YES] : nil;
+}
+
+- (nonnull NSArray<MEGAVPNRegion *> *)megaVpnRegions {
+    if (!self.megaRequest) {
+        return @[];
+    }
+    mega::MegaVpnRegionList *regionList = self.megaRequest->getMegaVpnRegionsDetailed();
+    if (!regionList) {
+        return @[];
+    }
+    int count = regionList->size();
+    NSMutableArray<MEGAVPNRegion *> *regionsArray = [[NSMutableArray alloc] initWithCapacity:(NSUInteger)count];
+    for (int i = 0; i < count; i++) {
+        const mega::MegaVpnRegion *region = regionList->get(i);
+        if (region) {
+            MEGAVPNRegion *vpnRegion = [[MEGAVPNRegion alloc] initWithMegaVpnRegion:region->copy() cMemoryOwn:YES];
+            [regionsArray addObject:vpnRegion];
+        }
+    }
+    return regionsArray;
 }
 
 - (nullable MEGANotificationList*)megaNotifications {

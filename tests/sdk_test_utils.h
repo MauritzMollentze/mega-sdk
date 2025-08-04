@@ -3,13 +3,53 @@
 
 #include "stdfs.h"
 
+#include <fstream>
+#include <functional>
 #include <optional>
 #include <set>
+#include <thread>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
 namespace sdk_test
 {
+
+/**
+ * @brief Opens a file with the given mode, and writes either "size" zeros or the given "contents".
+ *
+ * @tparam T A type that indicates the data: either std::size_t or std::string_view.
+ * @param filePath Path to open
+ * @param openMode e.g. std::ios::binary or std::ios::binary | std::ios::app
+ * @param data The data to write. If T = std::size_t, we write that many zero bytes.
+ *             If T = std::string_view or std::string, we write those bytes.
+ */
+template<typename T>
+void writeFileContent(const fs::path& filePath, const std::ios::openmode openMode, const T& data)
+{
+    std::ofstream outFile(filePath, openMode);
+    if (!outFile.is_open())
+    {
+        const auto msg = "Cannot open file: " + filePath.string();
+        throw std::runtime_error(msg);
+    }
+
+    if constexpr (std::is_convertible_v<T, std::size_t>)
+    {
+        // data is a byte count -> write that many zeros
+        const std::vector<char> buffer(data, 0);
+        outFile.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    }
+    else if constexpr (std::is_same_v<T, std::string_view> || std::is_same_v<T, std::string>)
+    {
+        // data is a string -> write these contents
+        outFile.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    else
+    {
+        static_assert(!sizeof(T*), "writeFileContent used with invalid type");
+    }
+}
 
 /**
  * @brief Returns the path to the folder containing resources for the tests.
@@ -35,13 +75,49 @@ void setTestDataDir(const fs::path& dataDir);
 void copyFileFromTestData(fs::path filename, fs::path destination = ".");
 
 /**
+ * @brief Returns a SHA-256 hash of the file.
+ */
+std::string hashFile(const fs::path& filePath);
+
+/**
+ * @brief Returns a SHA-256 hash of the file with a human-readable format.
+ */
+std::string hashFileHex(const fs::path& filePath);
+
+/**
+ * @brief Creates a file of a given size with random, printable data. It throws if the file cannot
+ * be opened.
+ */
+void createRandomFile(const fs::path& filePath, const size_t fileSizeBytes);
+
+/**
+ * @brief Creates a file of a given size. It throws if the file cannot be opened
+ */
+void createFile(const fs::path& filePath, const size_t fileSizeBytes);
+
+/**
+ * @brief Creates a file with the given contents. It throws if the file cannot be opened
+ */
+void createFile(const fs::path& filePath, const std::string_view contents);
+
+/**
+ * @brief Appends data to a file with the given contents. It throws if the file cannot be opened
+ */
+void appendToFile(const fs::path& filePath, const size_t bytesToAppend);
+
+/**
+ * @brief Appends data to a file with the given contents. It throws if the file cannot be opened
+ */
+void appendToFile(const fs::path& filePath, const std::string_view contentsToAppend);
+
+/**
  * @class LocalTempFile
  * @brief Helper class to apply RAII when creating a file locally
  */
 class LocalTempFile
 {
 public:
-    LocalTempFile(const fs::path& _filePath, const unsigned int fileSizeBytes);
+    LocalTempFile(const fs::path& _filePath, const size_t fileSizeBytes);
     LocalTempFile(const fs::path& _filePath, const std::string_view contents);
     ~LocalTempFile();
 
@@ -53,8 +129,59 @@ public:
     LocalTempFile(LocalTempFile&&) noexcept = default;
     LocalTempFile& operator=(LocalTempFile&&) noexcept = default;
 
+    const fs::path& getPath() const
+    {
+        return mFilePath;
+    }
+
+    /*
+     * @brief Appends bytesToAppend of data to the file.
+     * @see appendToFile()
+     */
+    void appendData(const size_t bytesToAppend) const;
+    /*
+     * @brief Appends contents to the file.
+     * @see appendToFile()
+     */
+    void appendData(const std::string_view contentsToAppend) const;
+
 private:
     fs::path mFilePath;
+};
+
+/**
+ * @class LocalTempDir
+ * @brief Helper class to apply RAII when creating a directory locally
+ */
+class LocalTempDir
+{
+public:
+    LocalTempDir(const fs::path& _dirPath);
+    ~LocalTempDir();
+
+    // Delete copy constructors -> Don't allow many objects to remove the same dir
+    LocalTempDir(const LocalTempDir&) = delete;
+    LocalTempDir& operator=(const LocalTempDir&) = delete;
+
+    // Allow move operations
+    LocalTempDir(LocalTempDir&&) noexcept = default;
+    LocalTempDir& operator=(LocalTempDir&&) noexcept = default;
+
+    const fs::path& getPath() const
+    {
+        return mDirPath;
+    }
+
+    /**
+     * @brief Move the current temp dir to the given location
+     *
+     * @return true if the operation succeeded, false there was an error or if there is already a
+     * file/directory in the given newLocation.
+     */
+    bool move(const fs::path& newLocation);
+
+private:
+    fs::path mDirPath;
 };
 
 /**
@@ -150,6 +277,12 @@ struct FileNodeInfo: public NodeCommonInfo<FileNodeInfo>
                                                      _secondsSinceMod);
         return *this;
     }
+
+    FileNodeInfo& setMtime(const std::chrono::system_clock::time_point _timePoint)
+    {
+        mtime = std::chrono::system_clock::to_time_t(_timePoint);
+        return *this;
+    }
 };
 
 struct DirNodeInfo;
@@ -180,7 +313,79 @@ struct DirNodeInfo: public NodeCommonInfo<DirNodeInfo>
         childs.emplace_back(child);
         return *this;
     }
+
+    /**
+     * @brief Returns a vector with the names of the firs successors of the directory
+     */
+    std::vector<std::string> getChildrenNames() const;
 };
+
+/**
+ * @brief Returns the names in the tree specified by node
+ *
+ * @note The tree is iterated using a depth-first approach
+ */
+std::vector<std::string> getNodeNames(const NodeInfo& node);
+
+/**
+ * @brief Get the name of the give node
+ */
+std::string getNodeName(const NodeInfo& node);
+
+/**
+ * @brief Waits for a condition to become true or until a timeout occurs.
+ *
+ * This function repeatedly checks a predicate at intervals (controlled by sleepDuration)
+ * and stops when the predicate returns true or when the specified timeout has been reached.
+ *
+ * @tparam Duration The type of the timeout duration (e.g., std::chrono::milliseconds,
+ * std::chrono::seconds).
+ * @tparam SleepDuration The type of the sleep interval between predicate checks (default is
+ * std::chrono::milliseconds).
+ * @param predicate The condition to be evaluated. It should be a callable returning a bool.
+ * @param timeout The maximum duration to wait for the predicate to return true.
+ * @param sleepDuration The interval between each check of the predicate. Defaults to 100
+ * milliseconds.
+ *
+ * @return true if the predicate returns true within the timeout period, otherwise false.
+ *
+ * @note The predicate will be evaluated at least once, and then at intervals of `sleepDuration`.
+ *
+ * @example
+ * using namespace std::chrono_literals
+ * bool conditionMet = waitFor(
+ *     [] { return some_condition(); },
+ *     5s,
+ *     200ms
+ * );
+ */
+template<typename Duration, typename SleepDuration = std::chrono::milliseconds>
+bool waitFor(const std::function<bool()>& predicate,
+             Duration timeout,
+             SleepDuration sleepDuration = std::chrono::milliseconds(100))
+{
+    auto startTime = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - startTime < timeout)
+    {
+        if (predicate())
+            return true;
+        std::this_thread::sleep_for(sleepDuration);
+    }
+    return false;
+}
+
+/**
+ * @brief Get the names of the files/directories that are contained within the given path.
+ *
+ * Note: if the path does not point to a directory, an empty vector is returned
+ *
+ * @param localPath The path to evaluate their children
+ * @param filter Required named-based condition to be included in the results.
+ * @return A vector with the names of the children
+ */
+std::vector<std::string>
+    getLocalFirstChildrenNames_if(const std::filesystem::path& localPath,
+                                  std::function<bool(const std::string&)> filter = nullptr);
 }
 
 #endif // INCLUDE_TESTS_SDK_TEST_UTILS_H_

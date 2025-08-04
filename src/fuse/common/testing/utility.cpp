@@ -2,11 +2,11 @@
 #include <fstream>
 #include <sstream>
 
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/date_time.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/inode_info.h>
 #include <mega/fuse/common/logging.h>
-#include <mega/fuse/common/node_info.h>
 #include <mega/fuse/common/testing/client.h>
 #include <mega/fuse/common/testing/path.h>
 #include <mega/fuse/common/testing/utility.h>
@@ -20,6 +20,8 @@ namespace fuse
 {
 namespace testing
 {
+
+using namespace common;
 
 class StandardInputStream
   : public InputStreamAccess
@@ -159,7 +161,7 @@ ErrorOr<FileFingerprint> fingerprint(const std::string& content,
 
     // Couldn't generate fingerprint.
     if (!fingerprint.isvalid)
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Return fingerprint to caller.
     return fingerprint;
@@ -174,21 +176,21 @@ ErrorOr<FileFingerprint> fingerprint(const Path& path)
 
     // Couldn't determine when the file was modified.
     if (error)
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Try and determine the file's size.
     auto size = file_size(path.path(), error);
 
     // Can't get the file's size.
     if (error)
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Open the file for reading.
     std::ifstream ifstream(path.string(), std::ios::binary);
 
     // Couldn't open the file for reading.
     if (!ifstream.is_open())
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Convenience.
     auto size_ = static_cast<m_off_t>(size);
@@ -203,7 +205,7 @@ ErrorOr<FileFingerprint> fingerprint(const Path& path)
 
     // Couldn't generate the fingerprint.
     if (!fingerprint.isvalid)
-        return API_EREAD;
+        return unexpected(API_EREAD);
 
     // Return fingerprint to caller.
     return fingerprint;

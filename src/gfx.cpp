@@ -53,7 +53,8 @@ bool GfxProc::isgfx(const LocalPath& localfilename)
 {
     const char* supported = nullptr;
 
-    if (!(supported = mGfxProvider->supportedformats()))
+    supported = mGfxProvider->supportedformats();
+    if (!supported)
     {
         // We don't have supported formats, so the build was without FREEIMAGE or other graphics processing libraries
         // Therefore we cannot graphics process any file, so return false so that we don't try.
@@ -74,7 +75,8 @@ bool GfxProc::isgfx(const LocalPath& localfilename)
         const char* ptr;
 
         // FIXME: use hash
-        if ((ptr = strstr(supported, ext.c_str())) && ptr[ext.size()] == '.')
+        ptr = strstr(supported, ext.c_str());
+        if (ptr && ptr[ext.size()] == '.')
         {
             return true;
         }
@@ -87,7 +89,8 @@ bool GfxProc::isvideo(const LocalPath& localfilename)
 {
     const char* supported = nullptr;
 
-    if (!(supported = mGfxProvider->supportedvideoformats()))
+    supported = mGfxProvider->supportedvideoformats();
+    if (!supported)
     {
         return false;
     }
@@ -106,7 +109,8 @@ bool GfxProc::isvideo(const LocalPath& localfilename)
         const char* ptr;
 
         // FIXME: use hash
-        if ((ptr = strstr(supported, ext.c_str())) && ptr[ext.size()] == '.')
+        ptr = strstr(supported, ext.c_str());
+        if (ptr && ptr[ext.size()] == '.')
         {
             return true;
         }
@@ -141,7 +145,7 @@ void GfxProc::loop()
     {
         waiter.init(NEVER);
         waiter.wait();
-        while ((job = requests.pop()))
+        while ((job = requests.pop()) != nullptr)
         {
             if (finished)
             {
@@ -154,8 +158,7 @@ void GfxProc::loop()
             auto images = generateImages(job->localfilename, getJobDimensions(job));
             for (auto& image : images)
             {
-                string* jpeg = image.empty() ? nullptr : new string(std::move(image));
-                job->images.push_back(jpeg);
+                job->images.push_back(image.empty() ? nullptr : new string(std::move(image)));
             }
 
             responses.push(job);
@@ -163,12 +166,12 @@ void GfxProc::loop()
         }
     }
 
-    while ((job = requests.pop()))
+    while ((job = requests.pop()) != nullptr)
     {
         delete job;
     }
 
-    while ((job = responses.pop()))
+    while ((job = responses.pop()) != nullptr)
     {
         for (unsigned i = 0; i < job->imagetypes.size(); i++)
         {
@@ -187,7 +190,7 @@ int GfxProc::checkevents(Waiter *)
 
     GfxJob *job = NULL;
     bool needexec = false;
-    while ((job = responses.pop()))
+    while ((job = responses.pop()) != nullptr)
     {
         for (unsigned i = 0; i < job->images.size(); i++)
         {
@@ -200,7 +203,11 @@ int GfxProc::checkevents(Waiter *)
                 // The file attribute will either be added to an existing node
                 // or added to the eventual putnodes if this was started as part of an upload transfer
                 mCheckEventsKey.setkey(job->key);
-                if (!client->putfa(job->h, job->imagetypes[i], &mCheckEventsKey, 0, std::unique_ptr<string>(job->images[i])))
+                if (client->putfa(job->h,
+                                  job->imagetypes[i],
+                                  &mCheckEventsKey,
+                                  0,
+                                  std::unique_ptr<string>(job->images[i])) != API_OK)
                 {
                     continue; // no needexec for this one
                 }
@@ -253,7 +260,6 @@ std::vector<std::string> IGfxLocalProvider::generateImages(const LocalPath& loca
     {
         for (unsigned int i = 0; i < dimensions.size(); ++i)
         {
-            string jpeg;
             int targetWidth = dimensions[i].w(), targetHeight = dimensions[i].h();
             if (width() < targetWidth && height() < targetHeight)
             {
@@ -262,9 +268,15 @@ std::vector<std::string> IGfxLocalProvider::generateImages(const LocalPath& loca
                 targetHeight = height();
             }
             // LOG_verbose << "resizebitmap w/h: " << targetWidth << "/" << targetHeight;
-            if (resizebitmap(targetWidth, targetHeight, &jpeg))
+
+            // For thumbnail, PNG is allowed images with transparency
+            const auto hint = (dimensions[i] == GfxProc::DIMENSIONS[GfxProc::THUMBNAIL]) ?
+                                  Hint::FORMAT_PNG :
+                                  Hint::NONE;
+            string image;
+            if (resizebitmap(targetWidth, targetHeight, &image, hint))
             {
-                images[i] = std::move(jpeg);
+                images[i] = std::move(image);
             }
         }
         freebitmap();
@@ -364,16 +376,18 @@ std::string GfxProc::generateOneImage(const LocalPath& localfilepath, const GfxD
     return images[0];
 }
 
-bool GfxProc::savefa(const LocalPath& localfilepath, const GfxDimension& dimension, LocalPath& localdstpath)
+bool GfxProc::savefa(const LocalPath& localfilepath,
+                     const GfxDimension& dimension,
+                     const LocalPath& localdstpath)
 {
     if (!isgfx(localfilepath))
     {
         return false;
     }
 
-    string jpeg = generateOneImage(localfilepath, dimension);
+    string image = generateOneImage(localfilepath, dimension);
 
-    if (jpeg.empty())
+    if (image.empty())
     {
         return false;
     }
@@ -385,7 +399,7 @@ bool GfxProc::savefa(const LocalPath& localfilepath, const GfxDimension& dimensi
         return false;
     }
 
-    if (!f->fwrite((const byte*)jpeg.data(), unsigned(jpeg.size()), 0))
+    if (!f->fwrite((const byte*)image.data(), unsigned(image.size()), 0))
     {
         return false;
     }

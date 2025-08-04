@@ -2,12 +2,12 @@
 #include <future>
 #include <utility>
 
-#include <mega/fuse/common/error_or.h>
-#include <mega/fuse/common/log_level.h>
+#include <mega/common/error_or.h>
+#include <mega/log_level.h>
+#include <mega/common/utility.h>
 #include <mega/fuse/common/logging.h>
 #include <mega/fuse/common/testing/cloud_path.h>
 #include <mega/fuse/common/testing/real_client.h>
-#include <mega/fuse/common/utility.h>
 
 #include <mega/db/sqlite.h>
 #include <mega/logging.h>
@@ -21,6 +21,8 @@ namespace fuse
 {
 namespace testing
 {
+
+using namespace common;
 
 class RealClient::RealContact
   : public Contact
@@ -78,7 +80,7 @@ public:
     Error decline() override;
 }; // RealInvite
 
-fuse::Client& RealClient::client() const
+common::Client& RealClient::client() const
 {
     return mClient->mFuseClientAdapter;
 }
@@ -139,8 +141,7 @@ void RealClient::fetchnodes_result(const Error& error)
     requestCompleted(std::make_pair(RT_FETCH, mClient->restag), error);
 }
 
-auto RealClient::invited(const std::string& email,
-                         std::unique_lock<std::mutex>& lock) const -> InvitePtr
+auto RealClient::invited(const std::string& email, std::unique_lock<std::mutex>&) const -> InvitePtr
 {
     // Compares two characters case insensitively.
     auto characterEquals = [](std::uint8_t lhs, std::uint8_t rhs)
@@ -326,7 +327,7 @@ ErrorOr<std::string> RealClient::prelogin(const std::string& email)
     auto completion = [notifier](error result, std::string* salt) {
         // Couldn't perform prelogin.
         if (result != API_OK)
-            return notifier->set_value(result);
+            return notifier->set_value(unexpected(result));
 
         // Transmit salt to caller.
         notifier->set_value(*salt);
@@ -452,7 +453,7 @@ RealClient::RealClient(const std::string& clientName,
     mClient->clientname = clientName + " ";
 
     // Make sure FUSE logs *everything*.
-    mClient->mFuseService.logLevel(LOG_LEVEL_DEBUG);
+    mClient->mFuseService.logLevel(logDebug);
 
     // Instantiate the client's worker thread.
     mClientThread = std::thread(&RealClient::loop, this);
@@ -517,7 +518,7 @@ auto RealClient::invite(const std::string& email) -> ErrorOr<InvitePtr>
             return notifier->set_value(std::make_unique<RealInvite>(*this, id));
 
         // Couldn't send invitation.
-        notifier->set_value(result);
+        notifier->set_value(unexpected(result));
     }; // invited
 
     // Send the invite.
@@ -782,7 +783,7 @@ Error RealClient::RealInvite::execute(ipcactions_t action)
     return waitFor(notifier->get_future());
 }
 
-Error RealClient::RealInvite::execute(opcactions_t action)
+Error RealClient::RealInvite::execute(opcactions_t)
 {
     auto notifier = makeSharedPromise<Error>();
 
@@ -806,7 +807,7 @@ Error RealClient::RealInvite::execute(opcactions_t action)
     return waitFor(notifier->get_future());
 }
 
-bool RealClient::RealContact::mustVerify(std::unique_lock<std::mutex>& lock) const
+bool RealClient::RealContact::mustVerify(std::unique_lock<std::mutex>&) const
 {
     return mClient.mClient->mKeyManager.getManualVerificationFlag();
 }

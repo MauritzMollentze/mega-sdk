@@ -1,13 +1,14 @@
+#include <mega/common/error_or.h>
+#include <mega/common/normalized_path.h>
+#include <mega/common/task_queue.h>
 #include <mega/fuse/common/client.h>
-#include <mega/fuse/common/error_or.h>
 #include <mega/fuse/common/inode_info.h>
-#include <mega/fuse/common/mount_event_type.h>
+#include <mega/fuse/common/logger.h>
 #include <mega/fuse/common/mount_event.h>
+#include <mega/fuse/common/mount_event_type.h>
 #include <mega/fuse/common/mount_info.h>
 #include <mega/fuse/common/mount_result.h>
-#include <mega/fuse/common/normalized_path.h>
 #include <mega/fuse/common/service.h>
-#include <mega/fuse/common/task_queue.h>
 #include <mega/fuse/platform/service_context.h>
 
 namespace mega
@@ -16,6 +17,8 @@ namespace fuse
 {
 namespace platform
 {
+
+using namespace common;
 
 ServiceContext::ServiceContext(const ServiceFlags&, Service& service)
   : fuse::ServiceContext(service)
@@ -42,22 +45,22 @@ void ServiceContext::current()
 
 ErrorOr<InodeInfo> ServiceContext::describe(const NormalizedPath&) const
 {
-    return API_ENOENT;
+    return unexpected(API_ENOENT);
 }
 
 void ServiceContext::disable(MountDisabledCallback callback,
-                             const LocalPath& path,
-                             bool remember)
+                             const std::string& name,
+                             bool)
 {
     callback(MOUNT_UNKNOWN);
 
     MountEvent event;
 
-    event.mPath = path;
+    event.mName = name;
     event.mResult = MOUNT_UNKNOWN;
     event.mType = MOUNT_DISABLED;
 
-    client().emitEvent(event);
+    emitEvent(client(), event);
 }
 
 MountResult ServiceContext::discard(bool)
@@ -70,36 +73,36 @@ MountResult ServiceContext::downgrade(const LocalPath&, std::size_t)
     return MOUNT_UNSUPPORTED;
 }
 
-MountResult ServiceContext::enable(const LocalPath&, bool)
+MountResult ServiceContext::enable(const std::string&, bool)
 {
     return MOUNT_UNKNOWN;
 }
 
-bool ServiceContext::enabled(const LocalPath&) const
+bool ServiceContext::enabled(const std::string&) const
 {
     return false;
 }
 
 Task ServiceContext::execute(std::function<void(const Task&)> function)
 {
-    Task task(std::move(function));
+    Task task(std::move(function), logger());
 
     task.cancel();
 
     return task;
 }
 
-MountResult ServiceContext::flags(const LocalPath&, const MountFlags&)
+MountResult ServiceContext::flags(const std::string&, const MountFlags&)
 {
     return MOUNT_UNKNOWN;
 }
 
-MountFlagsPtr ServiceContext::flags(const LocalPath&) const
+MountFlagsPtr ServiceContext::flags(const std::string&) const
 {
     return nullptr;
 }
 
-MountInfoPtr ServiceContext::get(const LocalPath&) const
+MountInfoPtr ServiceContext::get(const std::string&) const
 {
     return nullptr;
 }
@@ -109,12 +112,12 @@ MountInfoVector ServiceContext::get(bool) const
     return MountInfoVector();
 }
 
-NormalizedPathVector ServiceContext::paths(const std::string&) const
+NormalizedPath ServiceContext::path(const std::string&) const
 {
-    return NormalizedPathVector();
+    return NormalizedPath();
 }
 
-MountResult ServiceContext::remove(const LocalPath&)
+MountResult ServiceContext::remove(const std::string&)
 {
     return MOUNT_UNKNOWN;
 }

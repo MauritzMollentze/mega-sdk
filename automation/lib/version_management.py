@@ -11,6 +11,7 @@ class JiraProject:
     - rename NextRelease to the new version
     - create new NextRelease version
     - get release notes
+    - check all tickets on a release are resolved or closed
     """
 
     _NEXT_RELEASE = "NextRelease"
@@ -18,11 +19,10 @@ class JiraProject:
     def __init__(
         self,
         url: str,
-        username: str,
-        password: str,
+        token: str,
         project: str,
     ):
-        self._jira = JIRA(url, basic_auth=(username, password))
+        self._jira = JIRA(url, token_auth=token)
         self._project_key = self._get_project_key(project)
         assert self._project_key, f"No project found with name {project}"
         self._version_manager_url = f"{self._jira.server_url}/rest/versionmanager/1.0/versionmanager/{self._project_key}"
@@ -49,6 +49,8 @@ class JiraProject:
         assert self._version is not None
         assert self._version.released == False
         self._version_id = self._version.id
+        self._check_all_tickets_are_resolved_or_closed()
+        self._check_all_tickets_have_release_number_affected()
 
     def update_current_version(self, to_version: str, used_by_apps: str):
         from datetime import date
@@ -81,7 +83,7 @@ class JiraProject:
             url=self._version_manager_url,
             data={
                 "name": name,
-                "releasedate": today,
+                "startdate": today,
                 "description": f"Version {name} - {for_apps}",
             },
         )
@@ -203,22 +205,30 @@ class JiraProject:
         all_versions = self._jira.project_versions(self._project_key)
         for v in all_versions:
             assert isinstance(v, Version)
+
             if (
-                not v.archived
-                and not v.released
-                and v.name != self._version.name
-                and re.match(r"^v(\d)+\.(\d+)\.(\d+)$", v.name)
+                v.archived
+                or not v.released
+                or v.name == self._version.name
+                or v.name == self._NEXT_RELEASE
             ):
-                old_major, old_minor, old_micro = (
-                    int(n) for n in v.name[1:].split(".")
-                )
-                assert new_major < old_major or (
-                    new_major == old_major
-                    and (
-                        new_minor < old_minor
-                        or (new_minor == old_minor and new_micro < old_micro)
-                    )
-                ), f"Release {v.name} must be closed before continuing"
+                continue
+
+            match = re.match(r"^v(\d+)\.(\d+)\.(\d+)$", v.name)
+            if not match:
+                continue
+            old_major, old_minor, old_micro = map(int, match.groups())
+            if (
+                new_major,
+                new_minor,
+                new_micro,
+            ) < (
+                old_major,
+                old_minor,
+                old_micro,
+            ):
+                return False
+        return True
 
     def get_next_version(self) -> tuple[int, int, int]:
         highest_existing_version = self._get_highest_existing_version()
@@ -280,7 +290,10 @@ class JiraProject:
         release_number_affected = "Patch"
         for i in unreleased_issues:
             assert isinstance(i, Issue)
-            affected = i.raw["fields"][custom_field_id]["value"]
+            custom_field_data = i.raw.get("fields", {}).get(custom_field_id)
+            assert custom_field_data, f"Missing 'Release number affected' field in ticket: {i.key}"
+            affected = custom_field_data.get("value")
+
             if affected == "Major":
                 return affected
             if affected == "Minor":
@@ -297,3 +310,32 @@ class JiraProject:
                     fixVersions.append({"name": v.name})
             fixVersions.append({"name": self._version.name})
             issue.update({"fixVersions": fixVersions})
+
+    def _check_all_tickets_are_resolved_or_closed(self):
+        jql_query = (
+            f'project = "{self._project_key}" AND fixVersion = "{self._version.name}" '
+            f'AND status NOT IN ("Resolved", "Closed")'
+        )
+        issues = self._jira.search_issues(jql_query)
+
+        assert not issues, (
+            f"The following tickets are not resolved or closed for Fix Version '{self._version.name}':\n"
+            + "\n".join(
+                f"- {issue.key} -> {issue.fields.status.name}" for issue in issues
+            )
+        )
+
+    def _check_all_tickets_have_release_number_affected(self):
+        jql_query = (
+            f'project = "{self._project_key}" AND fixVersion = "{self._version.name}" '
+            f'AND "Release number affected" is EMPTY'
+        )
+        issues = self._jira.search_issues(jql_query)
+
+        assert not issues, (
+            f"The following tickets are missing the release number affected field:\n"
+            + "\n".join(
+                f"- {issue.key}" for issue in issues
+            )
+        )
+

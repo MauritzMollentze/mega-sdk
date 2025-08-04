@@ -21,6 +21,9 @@
 #import "MEGANode.h"
 #import "megaapi.h"
 #import "PasswordNodeData.h"
+#import "MEGACreditCardNodeData+init.h"
+#import "MEGAStringList+init.h"
+#import "MEGATOTPData+init.h"
 
 using namespace mega;
 
@@ -93,10 +96,17 @@ using namespace mega;
     NSString *notes = data->notes() ? [NSString stringWithUTF8String:data->notes()] : nil;
     NSString *url = data->url() ? [NSString stringWithUTF8String:data->url()] : nil;
     NSString *un = data->userName() ? [NSString stringWithUTF8String:data->userName()] : nil;
-
-    PasswordNodeData *passwordNodeData = [[PasswordNodeData alloc] initWithPassword:pwd notes:notes url:url userName:un];
+    MEGATOTPData *totp = data->totpData() ? [[MEGATOTPData alloc] initWithMegaTotpData:data->totpData()->copy() cMemoryOwn:YES] : nil;
+    
+    PasswordNodeData *passwordNodeData = [[PasswordNodeData alloc] initWithPassword:pwd notes:notes url:url userName:un totp:totp];
 
     return passwordNodeData;
+}
+
+- (nullable MEGACreditCardNodeData *)creditCardNodeData {
+    if (!self.megaNode || self.megaNode->getCreditCardData() == nil) return nil;
+    
+    return [[MEGACreditCardNodeData alloc] initWithMegaCreditCardNodeData:self.megaNode->getCreditCardData() cMemoryOwn:YES];
 }
 
 - (NSInteger)duration {
@@ -289,8 +299,20 @@ using namespace mega;
     return self.megaNode ? self.megaNode->isNodeKeyDecrypted() : NO;
 }
 
+- (BOOL)isPasswordManagerNode {
+    return self.megaNode ? self.megaNode->isPasswordManagerNode() : false;
+}
+
 - (BOOL)isPasswordNode {
     return self.megaNode ? self.megaNode->isPasswordNode() : NO;
+}
+
+- (BOOL)isCreditCardNode {
+    return self.megaNode ? self.megaNode->isCreditCardNode() : NO;
+}
+
+- (MEGAStringList *)tags {
+    return self.megaNode ? [[MEGAStringList alloc] initWithMegaStringList:self.megaNode->getTags() cMemoryOwn:YES] : nil;
 }
 
 + (NSString *)stringForNodeLabel:(MEGANodeLabel)nodeLabel {

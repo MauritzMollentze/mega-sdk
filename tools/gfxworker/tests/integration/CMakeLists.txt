@@ -8,6 +8,7 @@ add_executable(gfxworker_test_integration
 target_link_libraries(gfxworker_test_integration
     PRIVATE
     libgfxworker
+    MEGA::test_tools
     MEGA::SDKlib
 )
 
@@ -24,11 +25,8 @@ endif()
 target_platform_compile_options(
     TARGET gfxworker_test_integration
     WINDOWS /W4
-            /wd4100 # unreferenced formal parameter
-            /wd4201 # nameless struct/union (nonstandard)
-            /wd4458 # identifier hides class member
             /we4800 # Implicit conversion from 'type' to bool. Possible information loss
-    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion -Wno-unused-parameter
+    UNIX $<$<CONFIG:Debug>:-ggdb3> -Wall -Wextra -Wconversion
 )
 
 if(ENABLE_SDKLIB_WERROR)
@@ -36,15 +34,5 @@ if(ENABLE_SDKLIB_WERROR)
         TARGET gfxworker_test_integration
         WINDOWS /WX
         UNIX  $<$<CONFIG:Debug>: -Werror>
-        APPLE $<$<CONFIG:Debug>: -Wno-sign-conversion -Wno-overloaded-virtual>
     )
 endif()
-
-# prepare test data
-# Integration tests require the following files to work
-file(GLOB TESTING_AUX_FILES "test_data/*")
-add_custom_command(
-    TARGET gfxworker_test_integration POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${TESTING_AUX_FILES} $<TARGET_FILE_DIR:gfxworker_test_integration>
-    COMMENT "Copying test files for gfxworker integration tests."
-)

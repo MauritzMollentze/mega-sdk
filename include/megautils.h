@@ -22,7 +22,10 @@
 #ifndef MEGAUTILS_H
 #define MEGAUTILS_H
 
+#include <cstdint>
+#include <map>
 #include <megaapi.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -39,9 +42,22 @@ std::vector<std::string> toNamesVector(const MegaNodeList& nodes);
 std::vector<std::string> stringListToVector(const MegaStringList& l);
 
 /**
+ * @brief Aux function to get a map<string, int> from a given MegaStringIntegerMap
+ */
+std::map<std::string, int64_t> stringIntegerMapToMap(const MegaStringIntegerMap& m);
+
+/**
  * @brief Aux function to get a vector with vector of strings in a given MegaRecentActionBucketList
  */
 std::vector<std::vector<std::string>> bucketsToVector(const MegaRecentActionBucketList& buckets);
+
+#ifdef ENABLE_SYNC
+/**
+ * @brief Convert a MegaSyncStallList into a vector of unique_ptr to its components. To own the
+ * elements, the function copies each element in the list.
+ */
+std::vector<std::unique_ptr<MegaSyncStall>> toSyncStallVector(const MegaSyncStallList& stallList);
+#endif
 }
 
 #endif // MEGAUTILS_H

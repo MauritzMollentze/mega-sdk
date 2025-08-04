@@ -5,10 +5,6 @@
 #define ENABLE_CHAT
 #include "megaapi.h"
 
-#if defined(__ANDROID__)
-#include <ares.h>
-#endif
-
 #ifdef ENABLE_WEBRTC
 #include "webrtc/modules/utility/include/jvm_android.h"
 #include "webrtc/rtc_base/logging.h"
@@ -23,16 +19,17 @@
 #endif
 
 #ifdef SWIGJAVA
-JavaVM *MEGAjvm = NULL;
+extern JavaVM* MEGAjvm;
 jstring strEncodeUTF8 = NULL;
 jclass clsString = NULL;
 jmethodID ctorString = NULL;
 jmethodID getBytes = NULL;
-jclass applicationClass = NULL;
-jmethodID startVideoCaptureMID = NULL;
-jmethodID stopVideoCaptureMID = NULL;
-jmethodID deviceListMID = NULL;
-jobject surfaceTextureHelper = NULL;
+extern jclass applicationClass;
+extern jmethodID deviceListMID;
+extern jobject surfaceTextureHelper;
+extern jclass fileWrapper;
+extern jclass integerClass;
+
 
 extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
 {
@@ -111,9 +108,25 @@ extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
     }
 #endif
 
-#if (defined(ANDROID) || defined(__ANDROID__)) && ARES_VERSION >= 0x010F00
-    ares_library_init_jvm(jvm);
-#endif
+    jclass localfileWrapper = jenv->FindClass("mega/privacy/android/data/filewrapper/FileWrapper");
+    if (!localfileWrapper)
+    {
+        jenv->ExceptionDescribe();
+        jenv->ExceptionClear();
+    }
+
+    fileWrapper = (jclass)jenv->NewGlobalRef(localfileWrapper);
+    jenv->DeleteLocalRef(localfileWrapper);
+
+    jclass localIntegerClass = jenv->FindClass("java/lang/Integer");
+    if (!localIntegerClass)
+    {
+        jenv->ExceptionDescribe();
+        jenv->ExceptionClear();
+    }
+
+    integerClass = (jclass)jenv->NewGlobalRef(localIntegerClass);
+    jenv->DeleteLocalRef(localIntegerClass);
 
     return JNI_VERSION_1_6;
 }
@@ -300,38 +313,6 @@ extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
 %}
 #endif
 
-#ifdef SWIGPHP
-
-%typemap(directorin) SWIGTYPE* 
-%{ 
-  ZVAL_UNDEF($input);
-  SWIG_SetPointerZval($input, (void *)$1, $1_descriptor, ($owner)|2);
-%}
-
-//Rename overloaded functions
-%rename (getInSharesAll, fullname=1) mega::MegaApi::getInShares();
-%rename (getOutSharesAll, fullname=1) mega::MegaApi::getOutShares();
-%rename (getTransfersAll, fullname=1) mega::MegaApi::getTransfers();
-%rename (getRootNodeOf, fullname=1) mega::MegaApi::getRootNode(MegaNode*);
-%rename (searchAll, fullname=1) mega::MegaApi::search(const char*);
-%rename (getNodeByFingerprintInFolder, fullname=1) mega::MegaApi::getNodeByFingerprint(const char*, MegaNode*);
-%rename (getFingerprintByInputStream, fullname=1) mega::MegaApi::getFingerprint(MegaInputStream*, int64_t);
-%rename (pauseTransfersByDirection, fullname=1) mega::MegaApi::pauseTransfers(bool, int, MegaRequestListener*);
-%rename (exportNodeWithTime, fullname=1) mega::MegaApi::exportNode(MegaNode*, int64_t, MegaRequestListener*);
-%rename (getMyAvatar, fullname=1) mega::MegaApi::getUserAvatar(const char*, MegaRequestListener*);
-%rename (getMyAvatar, fullname=1) mega::MegaApi::getUserAvatar(const char*);
-%rename (copyNodeWithName, fullname=1) mega::MegaApi::copyNode(MegaNode*, MegaNode*, const char*, MegaRequestListener*);
-%rename (loginToFolderWithKey, fullname = 1) mega::MegaApi::loginToFolder(const char*, const char *, MegaRequestListener*);
-%rename (moveNodeWithName, fullname=1) mega::MegaApi::moveNode(MegaNode*, MegaNode*, const char*, MegaRequestListener*);
-%rename (inviteContactWithLink, fullname=1) mega::MegaApi::inviteContact(const char*, const char*, int, MegaHandle, MegaRequestListener*);
-%rename (getInSharesFromUser, fullname=1) mega::MegaApi::getInShares(MegaUser*, int);
-
-%typemap(typecheck, precedence=SWIG_TYPECHECK_INTEGER) const char * {
-  $1 = (Z_TYPE($input) == IS_NULL || (Z_TYPE($input) == IS_STRING)) ? 1 : 0;
-}
-
-#endif
-
 %ignore mega::MegaApi::MEGA_DEBRIS_FOLDER;
 %ignore mega::MegaNode::getNodeKey;
 %ignore mega::MegaNode::getAttrString;
@@ -364,6 +345,8 @@ extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
 %newobject mega::MegaSyncStats::copy;
 %newobject mega::MegaRecentActionBucket::copy;
 %newobject mega::MegaRecentActionBucketList::copy;
+%newobject mega::MegaSyncStall::copy;
+%newobject mega::MegaSyncStallList::copy;
 %newobject mega::MegaStringMap::copy;
 %newobject mega::MegaContactRequest::copy;
 %newobject mega::MegaContactRequestList::copy;
@@ -373,10 +356,8 @@ extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
 %newobject mega::MegaUserAlert::copy;
 %newobject mega::MegaUserAlertList::copy;
 %newobject mega::MegaAchievementsDetails::getAwardEmails;
-%newobject mega::MegaRequest::getPublicMegaNode;
 %newobject mega::MegaTransfer::getPublicMegaNode;
-%newobject mega::MegaNode::getBase64Handle;
-%newobject mega::MegaNode::getFileAttrString;
+
 %newobject mega::MegaApi::getBase64PwKey;
 %newobject mega::MegaApi::getStringHash;
 %newobject mega::MegaApi::handleToBase64;
@@ -429,11 +410,19 @@ extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
 %newobject mega::MegaApi::getSessionTransferURL;
 %newobject mega::MegaApi::getAccountAuth;
 %newobject mega::MegaApi::authorizeNode;
+%newobject mega::MegaApi::getSyncs;
+%newobject mega::MegaApi::getEnabledNotifications;
+%newobject mega::MegaApi::getMimeType;
+%newobject mega::MegaApi::isNodeSyncableWithError;
+%newobject mega::MegaApi::getVersions;
 
+%newobject mega::MegaRequest::getPublicMegaNode;
 %newobject mega::MegaRequest::getMegaTimeZoneDetails;
 %newobject mega::MegaRequest::getMegaAccountDetails;
 %newobject mega::MegaRequest::getPricing;
 %newobject mega::MegaRequest::getMegaAchievementsDetails;
+%newobject mega::MegaRequest::getCurrency;
+
 %newobject mega::MegaAccountDetails::getSubscriptionMethod;
 %newobject mega::MegaAccountDetails::getSubscriptionCycle;
 %newobject mega::MegaAccountDetails::copy;
@@ -444,17 +433,25 @@ extern "C" jint JNIEXPORT JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
 %newobject mega::MegaAccountDetails::getPlan;
 %newobject mega::MegaAccountDetails::getSubscription;
 
-%newobject mega::MegaApi::getMimeType;
-
+%newobject mega::MegaNode::getBase64Handle;
+%newobject mega::MegaNode::getFileAttrString;
 %newobject mega::MegaNode::PasswordNodeData::createInstance;
 %newobject mega::MegaNode::unserialize;
 %newobject mega::MegaNode::getTags;
 %newobject mega::MegaNode::getCustomAttrNames;
+%newobject mega::MegaNode::copy;
+%newobject mega::MegaNode::getPublicNode;
+%newobject mega::MegaNode::getPublicLink;
+%newobject mega::MegaNode::getCreditCardData;
+%newobject mega::MegaNode::getPasswordData;
+%newobject mega::MegaNode::serialize;
 
 typedef long long time_t;
 typedef long long uint64_t;
 typedef long long int64_t;
 typedef long long uint32_t;
 typedef long long int32_t;
+
+%include "std_string.i"
 
 %include "megaapi.h"

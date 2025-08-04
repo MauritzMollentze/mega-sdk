@@ -50,7 +50,7 @@ GfxProviderCG::~GfxProviderCG() {
 }
 
 const char* GfxProviderCG::supportedformats() {
-    return ".bmp.cr2.crw.cur.dng.gif.heic.ico.j2c.jp2.jpf.jpeg.jpg.nef.orf.pbm.pdf.pgm.png.pnm.ppm.psd.raf.rw2.rwl.tga.tif.tiff.3g2.3gp.avi.m4v.mov.mp4.mqv.qt.webp.";
+    return ".bmp.cr2.crw.cur.dng.gif.heic.ico.j2c.jp2.jpf.jpeg.jpg.nef.orf.pbm.pdf.pgm.png.pnm.ppm.psd.raf.rw2.rwl.tga.tif.tiff.3g2.3gp.avi.m4v.mov.mp4.mqv.qt.webp.jxl.avif.";
 }
 
 const char* GfxProviderCG::supportedvideoformats() {
@@ -68,7 +68,7 @@ bool GfxProviderCG::readbitmap(const LocalPath& path, int size) {
     // Make absolute path usable to Cocoa.
     NSString* sourcePath =
       [NSString stringWithCString: absolutePath.c_str()
-                encoding: [NSString defaultCStringEncoding]];
+                encoding:NSUTF8StringEncoding];
 
     // Couldn't create a Cocoa-friendly path.
     if (sourcePath == nil) {
@@ -100,13 +100,13 @@ bool GfxProviderCG::readbitmap(const LocalPath& path, int size) {
                 CFDictionaryRef imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, imageOptions);
                 if (imageProperties) {
                     CFNumberRef width = (CFNumberRef)CFDictionaryGetValue(imageProperties, kCGImagePropertyPixelWidth);
-                    CFNumberRef heigth = (CFNumberRef)CFDictionaryGetValue(imageProperties, kCGImagePropertyPixelHeight);
-                    if (width && heigth) {
+                    CFNumberRef height = (CFNumberRef)CFDictionaryGetValue(imageProperties, kCGImagePropertyPixelHeight);
+                    if (width && height) {
                         CGFloat value;
                         if (CFNumberGetValue(width, kCFNumberCGFloatType, &value)) {
                             w = value;
                         }
-                        if (CFNumberGetValue(heigth, kCFNumberCGFloatType, &value)) {
+                        if (CFNumberGetValue(height, kCFNumberCGFloatType, &value)) {
                             h = value;
                         }
                     }
@@ -153,8 +153,8 @@ static inline NSData* dataForImage(CGImageRef image) {
 }
 #endif
 
-bool GfxProviderCG::resizebitmap(int rw, int rh, string* jpegout) {
-    jpegout->clear();
+bool GfxProviderCG::resizebitmap(int rw, int rh, string* imageOut, Hint) {
+    imageOut->clear();
     
     bool isThumbnail = !rh;
     
@@ -171,13 +171,39 @@ bool GfxProviderCG::resizebitmap(int rw, int rh, string* jpegout) {
     }
 
     CGSize size = CGSizeMake(rw, rh);
-    __block NSData *data;
+    __block NSData *data = nil;
 
     QLThumbnailGenerationRequest *request = [[QLThumbnailGenerationRequest alloc] initWithFileAtURL:(__bridge NSURL *)sourceURL size:size scale:1.0 representationTypes:QLThumbnailGenerationRequestRepresentationTypeThumbnail];
 
     [QLThumbnailGenerator.sharedGenerator generateBestRepresentationForRequest:request completionHandler:^(QLThumbnailRepresentation * _Nullable thumbnail, NSError * _Nullable error) {
         if (error) {
             LOG_err << "Error generating best representation for a request: " << error.localizedDescription;
+#if TARGET_OS_IPHONE
+            NSString *path = ((__bridge NSURL *)sourceURL).path;
+            if ([NSFileManager.defaultManager fileExistsAtPath:path]) {
+                UIImage *image = [UIImage imageWithContentsOfFile:path];
+                UIImage *thumbnail = [image imageByPreparingThumbnailOfSize:size];
+                if (thumbnail) {
+                    if (isThumbnail) {
+                        CGImageRef newImage = CGImageCreateWithImageInRect(thumbnail.CGImage, tileRect(CGImageGetWidth(thumbnail.CGImage), CGImageGetHeight(thumbnail.CGImage)));
+                        data = UIImageJPEGRepresentation([UIImage imageWithCGImage:newImage], COMPRESSION_QUALITY);
+                        if (newImage) {
+                            CFRelease(newImage);
+                        }
+                    } else {
+                        data = UIImageJPEGRepresentation(thumbnail, COMPRESSION_QUALITY);
+                    }
+
+                    if (!data) {
+                        LOG_err << "Could not convert image to data for image for path: " << path;
+                    }
+                } else {
+                    LOG_err << "Could not generate thumbnail for image at path: " << path;
+                }
+            } else {
+                LOG_err << "Could not find the image at path: " << path;
+            }
+#endif
         } else {
             if (isThumbnail) {
                 CGImageRef newImage = CGImageCreateWithImageInRect(thumbnail.CGImage, tileRect(CGImageGetWidth(thumbnail.CGImage), CGImageGetHeight(thumbnail.CGImage)));
@@ -204,7 +230,7 @@ bool GfxProviderCG::resizebitmap(int rw, int rh, string* jpegout) {
     
     dispatch_time_t waitTime = dispatch_time(DISPATCH_TIME_NOW, WAIT_60_SECONDS * NSEC_PER_SEC);
     dispatch_semaphore_wait(semaphore, waitTime);
-    jpegout->assign((char*) data.bytes, data.length);
+    imageOut->assign((char*) data.bytes, data.length);
     return data;
 }
 

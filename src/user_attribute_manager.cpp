@@ -12,27 +12,6 @@ using namespace std;
 namespace mega
 {
 
-const string* UserAttributeManager::getRawValue(attr_t at) const
-{
-    if (at == ATTR_AVATAR)
-        return nullptr; // its value is never cached
-
-    auto itAttr = mAttributes.find(at);
-    if (itAttr == mAttributes.end() || itAttr->second.isNotExisting())
-        return nullptr;
-
-    return &itAttr->second.value();
-}
-
-const string* UserAttributeManager::getVersion(attr_t at) const
-{
-    auto itAttr = mAttributes.find(at);
-    if (itAttr == mAttributes.end() || itAttr->second.isNotExisting())
-        return nullptr;
-
-    return &itAttr->second.version();
-}
-
 void UserAttributeManager::set(attr_t at, const string& value, const string& version)
 {
     const UserAttributeDefinition* d = UserAttributeDefinition::get(at);
@@ -66,6 +45,18 @@ bool UserAttributeManager::setIfNewVersion(attr_t at, const string& value, const
     UserAttribute& attr = insertResult.first->second;
     if (!insertResult.second && attr.version() == version)
     {
+        if (attr.isExpired())
+        {
+            /*
+             * In case we previously has marked an attr as expired, due to a version mismatch, and
+             * we later receive the same attr version that we keep with expired status, we should
+             * restore it's valid status.
+             *
+             * This prevent that an expired attr get stucked with expired status.
+             */
+            attr.setValid();
+            return true;
+        }
         return false;
     }
 
@@ -97,17 +88,15 @@ bool UserAttributeManager::setNotExisting(attr_t at)
     return true;
 }
 
-bool UserAttributeManager::isNotExisting(attr_t at) const
-{
-    auto itAttr = mAttributes.find(at);
-    return itAttr != mAttributes.end() && itAttr->second.isNotExisting();
-}
-
-void UserAttributeManager::setExpired(attr_t at)
+bool UserAttributeManager::setExpired(attr_t at)
 {
     const auto it = mAttributes.find(at);
-    if (it != mAttributes.end())
+    if (it != mAttributes.end() && !it->second.isExpired())
+    {
         it->second.setExpired();
+        return true;
+    }
+    return false;
 }
 
 bool UserAttributeManager::isValid(attr_t at) const
@@ -116,9 +105,36 @@ bool UserAttributeManager::isValid(attr_t at) const
     return itAttr != mAttributes.end() && itAttr->second.isValid();
 }
 
+const UserAttribute* UserAttributeManager::get(attr_t at) const
+{
+    auto itAttr = mAttributes.find(at);
+    return itAttr == mAttributes.end() ? nullptr : &itAttr->second;
+}
+
 bool UserAttributeManager::erase(attr_t at)
 {
-    return mAttributes.erase(at) > 0;
+    if (mCacheNonExistingAttributes)
+    {
+        return setNotExisting(at);
+    }
+    else
+    {
+        return mAttributes.erase(at) > 0;
+    }
+}
+
+bool UserAttributeManager::eraseUpdateVersion(attr_t at, const std::string& version)
+{
+    auto itAttr{mAttributes.find(at)};
+    if (itAttr != mAttributes.end() &&
+        (itAttr->second.isValid() || itAttr->second.version() != version))
+    {
+        bool notExisting = itAttr->second.isNotExisting();
+        itAttr->second.set("", version);
+        notExisting ? itAttr->second.setNotExisting() : itAttr->second.setExpired();
+        return true;
+    }
+    return false;
 }
 
 void UserAttributeManager::serializeAttributeFormatVersion(string& appendTo) const
@@ -149,7 +165,7 @@ void UserAttributeManager::serializeAttributes(string& d) const
                                        return attr.second.isValid();
                                    });
     assert(attrCount <= numeric_limits<unsigned char>::max());
-    d += static_cast<unsigned char>(attrCount);
+    d += static_cast<char>(attrCount);
 
     for (const auto& a: mAttributes)
     {
@@ -184,7 +200,7 @@ bool UserAttributeManager::unserializeAttributes(const char*& from,
     {
         if (from + sizeof(char) > upTo)
             return false;
-        unsigned char attrCount = *from++;
+        unsigned char attrCount = static_cast<unsigned char>(*from++);
         size_t sizeLength = (formatVersion == '1') ? 2 : 4;
         // formatVersion == 1 -> size of value uses 2 bytes
         // formatVersion == 2 -> size of value uses 4 bytes
@@ -237,7 +253,10 @@ bool UserAttributeManager::unserializeAttributes(const char*& from,
     {
         // ignore user attributes in this format
         AttrMap attrmap;
-        if ((from >= upTo) || !(from = attrmap.unserialize(from, upTo)))
+        if (from >= upTo)
+            return false;
+        from = attrmap.unserialize(from, upTo);
+        if (!from)
             return false;
     }
 

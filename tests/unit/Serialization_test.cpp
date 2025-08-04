@@ -66,7 +66,7 @@ TEST(Serialization, CacheableReaderWriter)
     std::string cstr1("test1");
     std::string cstr2("test2diffdata");
     std::string stringtest("diffstringagaindefinitelybigger");
-    int64_t i64 = 0x8765432112345678;
+    int64_t i64 = static_cast<int64_t>(0x8765432112345678);
     uint32_t u32 = 0x87678765;
     mega::handle handle1 = 0x998;
     bool b = true;
@@ -190,6 +190,20 @@ TEST(Serialization, CacheableReaderWriter)
     ASSERT_EQ(mp2.no_audio, false);
 }
 
+TEST(Serialization, SerializeWString)
+{
+    std::wstring wstringtest(L"file-файл.txt");
+    std::string writestring;
+    mega::CacheableWriter w(writestring);
+    w.serializestring(wstringtest);
+    EXPECT_EQ(writestring.size(), wstringtest.size() * sizeof(wchar_t) + 2);
+
+    // now read the serialized data back
+    mega::CacheableReader r(writestring);
+    std::wstring readedWstring;
+    EXPECT_TRUE(r.unserializestring(readedWstring));
+    ASSERT_EQ(readedWstring, wstringtest);
+}
 
 namespace {
 

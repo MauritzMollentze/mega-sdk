@@ -22,7 +22,10 @@
 #ifndef MEGA_APP_H
 #define MEGA_APP_H 1
 
+#include <mega/account.h>
 #include <mega/types.h>
+
+#include <cstdint>
 
 // FUSE.
 #include <mega/fuse/common/mount_event_forward.h>
@@ -38,10 +41,9 @@ struct AccountDetails;
 class MegaClient;
 class LocalPath;
 struct BusinessPlan;
-struct CurrencyData;
-struct TLVstore;
 struct AchievementsDetails;
 class Sync;
+struct Product;
 
 // callback interface
 struct MEGA_API MegaApp
@@ -154,9 +156,9 @@ struct MEGA_API MegaApp
     virtual void putnodes_result(const Error&,
                                  targettype_t,
                                  vector<NewNode>&,
-                                 bool targetOverride,
-                                 int tag,
-                                 const std::map<std::string, std::string>& fileHandles = {})
+                                 bool /*targetOverride*/,
+                                 int /*tag*/,
+                                 const std::map<std::string, std::string>& /*fileHandles*/ = {})
     {}
 
     // outgoing pending contact result
@@ -175,23 +177,7 @@ struct MEGA_API MegaApp
     virtual void putfa_result(handle, fatype, error) { }
 
     // purchase transactions
-    virtual void enumeratequotaitems_result(unsigned,
-                                            handle product,
-                                            unsigned proLevel,
-                                            int gbStorage,
-                                            int gbTransfer,
-                                            unsigned months,
-                                            unsigned amount,
-                                            unsigned amountMonth,
-                                            unsigned localPrice,
-                                            const char* description,
-                                            map<string, uint32_t>&& features,
-                                            const char* iosId,
-                                            const char* androidId,
-                                            unsigned int testCategory,
-                                            std::unique_ptr<BusinessPlan> businessPlan,
-                                            unsigned int trialDays)
-    {}
+    virtual void enumeratequotaitems_result(const Product&) {}
     virtual void enumeratequotaitems_result(unique_ptr<CurrencyData>) {}
     virtual void enumeratequotaitems_result(error) { }
     virtual void additem_result(error) { }
@@ -213,13 +199,14 @@ struct MEGA_API MegaApp
     virtual void putua_result(error) { }
     virtual void getua_result(error) { }
     virtual void getua_result(byte*, unsigned, attr_t) { }
-    virtual void getua_result(TLVstore *, attr_t) { }
+
+    virtual void getua_result(unique_ptr<string_map>, attr_t) {}
 #ifdef DEBUG
     virtual void delua_result(error) { }
+#endif
 
     // result of send dev subcommand's command
-    virtual void senddevcommand_result(int) { }
-#endif
+    virtual void senddevcommand_result(int) {}
 
     virtual void getuseremail_result(string *, error) { }
 
@@ -296,10 +283,20 @@ struct MEGA_API MegaApp
     virtual void chats_updated(textchat_map *, int) { }
     virtual void richlinkrequest_result(string*, error) { }
     virtual void chatlink_result(handle, error) { }
-    virtual void chatlinkurl_result (handle chatid, int shard, string* link, string* ct,
-                                     int numPeers, m_time_t ts, bool meetingRoom, int chatOptions,
-                                     const std::vector<std::unique_ptr<ScheduledMeeting>>* smList,
-                                     handle callid, error e) { }
+
+    virtual void
+        chatlinkurl_result(handle /*chatid*/,
+                           int /*shard*/,
+                           string* /*link*/,
+                           string* /*ct*/,
+                           int /*numPeers*/,
+                           m_time_t /*ts*/,
+                           bool /*meetingRoom*/,
+                           int /*chatOptions*/,
+                           const std::vector<std::unique_ptr<ScheduledMeeting>>* /*smList*/,
+                           handle /*callid*/,
+                           error)
+    {}
 
     virtual void chatlinkclose_result(error) { }
     virtual void chatlinkjoin_result(error) { }
@@ -312,13 +309,19 @@ struct MEGA_API MegaApp
     virtual void mediadetection_ready() {}
 
     // Locally calculated sum of sizes of files stored in cloud has changed
-    virtual void storagesum_changed(int64_t newsum) {}
+    virtual void storagesum_changed(int64_t /*newsum*/) {}
 
     // global transfer queue updates
-    virtual void file_added(File*) { }
-    virtual void file_removed(File*, const Error&) { }
-    virtual void file_complete(File*) { }
-    virtual File* file_resume(string*, direction_t*) { return NULL; }
+    virtual void file_added(File*) {}
+
+    virtual void file_removed(File*, const Error&) {}
+
+    virtual void file_complete(File*) {}
+
+    virtual File* file_resume(string*, direction_t*, uint32_t)
+    {
+        return NULL;
+    }
 
     virtual void transfer_added(Transfer*) { }
     virtual void transfer_removed(Transfer*) { }
@@ -331,8 +334,9 @@ struct MEGA_API MegaApp
     // ----- (other callbacks occur on the client thread)
 
     // sync status updates and events
-    virtual void syncupdate_stateconfig(const SyncConfig& config) { }
-    virtual void syncupdate_stats(handle backupId, const PerSyncStats&) { }
+    virtual void syncupdate_stateconfig(const SyncConfig&) {}
+
+    virtual void syncupdate_stats(handle /*backupId*/, const PerSyncStats&) {}
     virtual void syncupdate_syncing(bool) { }
     virtual void syncupdate_scanning(bool) { }
     virtual void syncupdate_stalled(bool) { }
@@ -341,13 +345,6 @@ struct MEGA_API MegaApp
     virtual void syncupdate_totalconflicts(bool) { }
     virtual void syncupdate_treestate(const SyncConfig &, const LocalPath&, treestate_t, nodetype_t) { }
     virtual bool isSyncStalledChanged() { return false; } // flag for syncupdate_totalstalls or syncupdate_totalstalls is set
-
-#ifdef DEBUG
-    // Called right before the sync engine processes a filesystem notification.
-    virtual void syncdebug_notification(const SyncConfig& config,
-                                        int queue,
-                                        const Notification& notification) { };
-#endif // DEBUG
 
     // after a root node of a sync changed its path
     virtual void syncupdate_remote_root_changed(const SyncConfig &) { }
@@ -359,10 +356,10 @@ struct MEGA_API MegaApp
     virtual void syncs_disabled(SyncError) { }
 
     // the sync could be auto-loaded on start, or one the user added
-    virtual void sync_added(const SyncConfig& config) { }
+    virtual void sync_added(const SyncConfig&) {}
 
     // after a sync has been removed
-    virtual void sync_removed(const SyncConfig& config) { }
+    virtual void sync_removed(const SyncConfig&) {}
 
     // ----- that's the end of the sync callbacks, which occur on the syncs thread
     // ----- (other callbacks occur on the client thread)
@@ -397,7 +394,7 @@ struct MEGA_API MegaApp
     virtual void notify_disconnect() { }
 
     // HTTP request finished
-    virtual void http_result(error, int, byte*, int) { }
+    virtual void http_result(error, int, byte*, m_off_t) {}
 
     // Timer ended
     virtual void timer_result(error) { }
@@ -447,7 +444,10 @@ struct MEGA_API MegaApp
     virtual void backupput_result(const Error&, handle /*backup id*/) { }
 
     virtual void getbanners_result(error) { }
-    virtual void getbanners_result(vector< tuple<int, string, string, string, string, string, string> >&& banners) { }
+
+    virtual void getbanners_result(
+        vector<tuple<int, string, string, string, string, string, string>>&& /*banners*/)
+    {}
 
     virtual void dismissbanner_result(error) { }
 
@@ -459,10 +459,15 @@ struct MEGA_API MegaApp
     virtual ~MegaApp() { }
 
     // External drive notifications
-    virtual void drive_presence_changed(bool appeared, const LocalPath& driveRoot) { }
+    virtual void drive_presence_changed(bool /*appeared*/, const LocalPath& /*driveRoot*/) {}
 
     // Called when a mount has been added, disabled, enabled or removed.
     virtual void onFuseEvent(const fuse::MountEvent&) { }
+
+    virtual void notify_network_activity(int /* networkActivityChannel */,
+                                         int /* networkActivityType */,
+                                         int /* code */)
+    {}
 };
 } // namespace
 

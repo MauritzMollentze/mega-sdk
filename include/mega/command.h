@@ -22,20 +22,25 @@
 #ifndef MEGA_COMMAND_H
 #define MEGA_COMMAND_H 1
 
-#include <memory>
-
-#include "types.h"
-#include "node.h"
 #include "account.h"
 #include "http.h"
 #include "json.h"
-#include "textchat.h"
+#include "network_connectivity_test_helpers.h"
+#include "node.h"
 #include "nodemanager.h"
+#include "setandelement.h"
+#include "textchat.h"
+#include "types.h"
+
+#include <memory>
+#include <optional>
+#include <variant>
 
 namespace mega {
 
 struct JSON;
 struct MegaApp;
+
 // request command component
 
 class MEGA_API Command
@@ -155,7 +160,7 @@ public:
     virtual bool procresult(Result, JSON&) = 0;
 
     // json for the command is usually pre-generated but can be calculated just before sending, by overriding this function
-    virtual const char* getJSON(MegaClient* client);
+    virtual const char* getJSON(MegaClient* clientOfRequest);
 
     Command();
     virtual ~Command();
@@ -163,7 +168,7 @@ public:
     bool checkError(Error &errorDetails, JSON &json);
 
     void addToNodePendingCommands(Node* n);
-    void removeFromNodePendingCommands(NodeHandle h, MegaClient* client);
+    void removeFromNodePendingCommands(NodeHandle h);
 
 #ifdef ENABLE_CHAT
     // create json structure for scheduled meetings (mcsmp command)
@@ -364,7 +369,7 @@ public:
     CommandRemoveContact(MegaClient*, const char*, visibility_t, Completion completion = nullptr);
 
 private:
-    void doComplete(error result);
+    void doComplete(error e);
 
     Completion mCompletion;
 };
@@ -427,10 +432,16 @@ public:
 
     typedef std::function<void(error)> CompletionErr;
     typedef std::function<void(byte*, unsigned, attr_t)> CompletionBytes;
-    typedef std::function<void(TLVstore*, attr_t)> CompletionTLV;
+    typedef std::function<void(unique_ptr<string_map>, attr_t)> CompletionTLV;
 
-    CommandGetUA(MegaClient*, const char*, attr_t, const char *, int,
-        CompletionErr completionErr, CompletionBytes completionBytes, CompletionTLV compltionTLV);
+    CommandGetUA(MegaClient*,
+                 const char*,
+                 attr_t,
+                 const char*,
+                 int,
+                 CompletionErr completionErr,
+                 CompletionBytes completionBytes,
+                 CompletionTLV completionTLV);
 
     bool procresult(Result, JSON&) override;
 
@@ -450,21 +461,21 @@ public:
 
     bool procresult(Result, JSON&) override;
 };
+#endif
 
 class MEGA_API CommandSendDevCommand : public Command
 {
 public:
-    bool procresult(Result, JSON&) override;
+    bool procresult(Result result, JSON& json) override;
 
-    CommandSendDevCommand(MegaClient*,
+    CommandSendDevCommand(MegaClient* client,
                           const char* command,
                           const char* email = NULL,
-                          long long = 0,
-                          int = 0,
-                          int = 0,
-                          const char* = nullptr);
+                          long long q = 0,
+                          int bs = 0,
+                          int us = 0,
+                          const char* cp = nullptr);
 };
-#endif
 
 class MEGA_API CommandGetUserEmail : public Command
 {
@@ -479,7 +490,7 @@ class MEGA_API CommandFetchNodes : public Command
 {
     bool mLoadSyncs = false;
 
-    const char* getJSON(MegaClient* client) override;
+    const char* getJSON(MegaClient* clientOfRequest) override;
 
 public:
     bool procresult(Result, JSON&) override;
@@ -501,7 +512,7 @@ protected:
     // sequence-tag, saved temporary while processing the response (it's received before nodes)
     string mSt;
 
-    std::unique_lock<mutex> mNodeTreeIsChanging;
+    std::unique_lock<recursive_mutex> mNodeTreeIsChanging;
     bool mFirstChunkProcessed = false;
 };
 
@@ -582,7 +593,8 @@ public:
 class MEGA_API CommandLogout : public Command
 {
     bool incrementedCount = false;
-    const char* getJSON(MegaClient* client) override;
+    const char* getJSON(MegaClient* clientOfRequest) override;
+
 public:
     using Completion = std::function<void(error)>;
 
@@ -654,7 +666,7 @@ public:
     void cancel() override;
     bool procresult(Result, JSON&) override;
 
-    CommandPutFile(MegaClient *client, TransferSlot*, int);
+    CommandPutFile(MegaClient* client, TransferSlot*);
 };
 
 class MEGA_API CommandGetPutUrl : public Command
@@ -665,7 +677,7 @@ class MEGA_API CommandGetPutUrl : public Command
 public:
     bool procresult(Result, JSON&) override;
 
-    CommandGetPutUrl(m_off_t size, int putmbpscap, bool forceSSL, bool getIP, Cb completion);
+    CommandGetPutUrl(m_off_t size, bool forceSSL, bool getIP, Cb completion);
 };
 
 
@@ -742,7 +754,7 @@ private:
     error generationError;
     bool mCanChangeVault;
 
-    const char* getJSON(MegaClient* client) override;
+    const char* getJSON(MegaClient* clientOfRequest) override;
 
     Completion completion;
 
@@ -803,6 +815,10 @@ public:
 
 protected:
     void parseUserAttribute(JSON& json, std::string& value, std::string &version, bool asciiToBinary = true);
+    bool updatePrivateEncryptedUserAttribute(User* u,
+                                             const std::string& value,
+                                             const std::string& version,
+                                             mega::attr_t at);
     std::function<void(string*, string*, string*, error)> mCompletion;
 };
 
@@ -840,7 +856,7 @@ public:
     CommandSetPendingContact(MegaClient*, const char*, opcactions_t, const char* = NULL, const char* = NULL, handle = UNDEF, Completion completion = nullptr);
 
 private:
-    void doComplete(handle handle, error result, opcactions_t actions);
+    void doComplete(handle handle, error e, opcactions_t actions);
 
     Completion mCompletion;
 };
@@ -857,7 +873,7 @@ public:
     CommandUpdatePendingContact(MegaClient*, handle, ipcactions_t, Completion completion = nullptr);
 
 private:
-    void doComplete(error result, ipcactions_t actions);
+    void doComplete(error e, ipcactions_t actions);
 
     Completion mCompletion;
 };
@@ -987,7 +1003,7 @@ class MEGA_API CommandEnumerateQuotaItems : public Command
 public:
     bool procresult(Result, JSON&) override;
 
-    CommandEnumerateQuotaItems(MegaClient*);
+    CommandEnumerateQuotaItems(const std::optional<std::string>& countryCode, MegaClient*);
 };
 
 class MEGA_API CommandSubmitPurchaseReceipt : public Command
@@ -1037,12 +1053,29 @@ public:
     {
     public:
         CancelSubscription(const char* reason, const char* id, int canContact);
+        CancelSubscription(std::vector<std::pair<std::string, std::string>>&& reasons,
+                           const char* id,
+                           int canContact);
+
+        template<class T>
+        const T* getReasoning() const
+        {
+            return std::get_if<T>(&mReasoning);
+        }
+
+        const std::string& getId() const
+        {
+            return mId;
+        }
+
+        bool canContact() const
+        {
+            return mCanContact == CanContact::Yes;
+        }
 
     private:
-        friend CommandCreditCardCancelSubscriptions;
-
         // Can be empty
-        std::string mReason;
+        std::variant<std::string, std::vector<std::pair<std::string, std::string>>> mReasoning;
         // Can be empty which means all subscriptions
         std::string mId;
 
@@ -1214,6 +1247,7 @@ public:
     bool procresult(Result, JSON&) override;
 
     CommandChatCreate(MegaClient*, bool group, bool publicchat, const userpriv_vector*, const string_map* ukm = NULL, const char* title = NULL, bool meetingRoom = false, int chatOptions = ChatOptions::kEmpty, const ScheduledMeeting* schedMeeting = nullptr);
+    ~CommandChatCreate();
 };
 
 typedef std::function<void(Error)> CommandSetChatOptionsCompletion;
@@ -1599,7 +1633,6 @@ public:
 
 class MEGA_API CommandBackupRemove : public Command
 {
-    handle mBackupId;
     std::function<void(const Error&)> mCompletion;
 
 public:
@@ -1677,20 +1710,31 @@ public:
     CommandDismissBanner(MegaClient*, int id, m_time_t ts);
 };
 
-
 //
 // Sets and Elements
 //
-
 class CommandSE : public Command // intermediary class to avoid code duplication
 {
 protected:
-    bool procjsonobject(JSON& json, handle& id, m_time_t& ts, handle* u, m_time_t* cts = nullptr,
-                        handle* s = nullptr, int64_t* o = nullptr, handle* ph = nullptr,
+    bool procjsonobject(JSON& json,
+                        handle& id,
+                        m_time_t& ts,
+                        handle* u,
+                        m_time_t* cts = nullptr,
+                        handle* s = nullptr,
+                        int64_t* o = nullptr,
+                        PublicLinkSet* publicLinkSet = nullptr,
                         uint8_t* setType = nullptr) const;
-    bool procresultid(JSON& json, const Result& r, handle& id, m_time_t& ts, handle* u,
-                      m_time_t* cts = nullptr, handle* s = nullptr, int64_t* o = nullptr,
-                      handle* ph = nullptr, uint8_t* setType = nullptr) const;
+    bool procresultid(JSON& json,
+                      const Result& r,
+                      handle& id,
+                      m_time_t& ts,
+                      handle* u,
+                      m_time_t* cts = nullptr,
+                      handle* s = nullptr,
+                      int64_t* o = nullptr,
+                      PublicLinkSet* publicLinkSet = nullptr,
+                      uint8_t* setType = nullptr) const;
     bool procerrorcode(const Result& r, Error& e) const;
     bool procExtendedError(JSON& json, int64_t& errCode, handle& eid) const;
 };
@@ -1862,7 +1906,6 @@ public:
 typedef std::function<void(Error, const std::vector<std::unique_ptr<ScheduledMeeting>>*)> CommandScheduledMeetingFetchCompletion;
 class MEGA_API CommandScheduledMeetingFetch : public Command
 {
-    handle mChatId;
     CommandScheduledMeetingFetchCompletion mCompletion;
 
 public:
@@ -1905,16 +1948,120 @@ public:
 };
 
 /* MegaVPN Commands BEGIN */
+class VpnCluster
+{
+public:
+    VpnCluster(std::string&& host,
+               std::vector<std::string>&& dns,
+               std::vector<std::string>&& addBlockingDns):
+        mHost{std::move(host)},
+        mDns{std::move(dns)},
+        mAdBlockingDns{std::move(addBlockingDns)}
+    {}
+
+    const std::string& getHost() const
+    {
+        return mHost;
+    }
+
+    const std::vector<std::string>& getDns() const
+    {
+        return mDns;
+    }
+
+    const std::vector<std::string>& getAdBlockingDns() const
+    {
+        return mAdBlockingDns;
+    }
+
+private:
+    std::string mHost; // "nz.vpn.mega.nz"
+    std::vector<std::string> mDns; // {"8.8.8.8", "8.8.4.4", ...}
+    std::vector<std::string> mAdBlockingDns;
+};
+
+class VpnRegion
+{
+public:
+    VpnRegion(std::string&& name):
+        mName{std::move(name)}
+    {}
+
+    const std::string& getName() const
+    {
+        return mName;
+    }
+
+    const std::string& getCountryCode() const
+    {
+        return mCountryCode;
+    }
+
+    const std::string& getCountryName() const
+    {
+        return mCountryName;
+    }
+
+    const std::string& getRegionName() const
+    {
+        return mRegionName;
+    }
+
+    const std::string& getTownName() const
+    {
+        return mTownName;
+    }
+
+    void setCountryCode(std::string&& countryCode)
+    {
+        mCountryCode = std::move(countryCode);
+    }
+
+    void setCountryName(std::string&& countryName)
+    {
+        mCountryName = std::move(countryName);
+    }
+
+    void setRegionName(std::string&& regionName)
+    {
+        mRegionName = std::move(regionName);
+    }
+
+    void setTownName(std::string&& townName)
+    {
+        mTownName = std::move(townName);
+    }
+
+    const std::map<int, VpnCluster>& getClusters() const
+    {
+        return mClusters;
+    }
+
+    void addCluster(int id, VpnCluster&& cluster)
+    {
+        mClusters.emplace(id, std::move(cluster));
+    }
+
+private:
+    std::string mName; // Name (handle) of the VPN Region
+    std::string mCountryCode;
+    std::string mCountryName;
+    std::string mRegionName; // Country region name
+    std::string mTownName;
+    std::map<int, VpnCluster> mClusters;
+};
+
 class MEGA_API CommandGetVpnRegions : public Command
 {
 public:
     using Cb = std::function<void(const Error& /* API error */,
-                                std::vector<std::string>&& /* VPN regions */)>;
+                                  std::vector<VpnRegion>&& /* VPN regions */)>;
     CommandGetVpnRegions(MegaClient*, Cb&& completion = nullptr);
     bool procresult(Result, JSON&) override;
-    static void parseregions(JSON& json, std::vector<std::string>*);
+    static bool parseRegions(JSON& json, std::vector<VpnRegion>* vpnRegions);
 
 private:
+    static bool parseClusters(JSON& json, VpnRegion* vpnRegion);
     Cb mCompletion;
 };
 
@@ -1933,7 +2080,7 @@ public:
     using Cb = std::function<void(const Error& /* API error */,
                                 MapSlotIDToCredentialInfo&& /* Map of SlotID: { ClusterID, IPv4, IPv6, DeviceID } */,
                                 MapClusterPublicKeys&& /* Map of ClusterID: Cluster Public Key */,
-                                std::vector<std::string>&& /* VPN Regions */)>;
+                                std::vector<VpnRegion>&& /* VPN Regions */)>;
     CommandGetVpnCredentials(MegaClient*, Cb&& completion = nullptr);
     bool procresult(Result, JSON&) override;
 
@@ -1981,6 +2128,23 @@ public:
 private:
     Cb mCompletion;
 };
+
+class MEGA_API CommandGetNetworkConnectivityTestServerInfo: public Command
+{
+public:
+    using Completion = std::function<void(const Error&, NetworkConnectivityTestServerInfo&&)>;
+    CommandGetNetworkConnectivityTestServerInfo(MegaClient*, Completion&&);
+    bool procresult(Result, JSON&) override;
+
+private:
+    void onParseFailure()
+    {
+        if (mCompletion)
+            mCompletion(API_EINTERNAL, {});
+    }
+
+    Completion mCompletion;
+};
 /* MegaVPN Commands END*/
 
 typedef std::function<void(const Error&, const std::map<std::string, std::string>& creditCardInfo)> CommandFetchCreditCardCompletion;
@@ -2020,6 +2184,8 @@ public:
 
 private:
     bool readCallToAction(JSON& json, std::map<std::string, std::string>& action);
+    bool readRenderModes(JSON& json,
+                         std::map<std::string, std::map<std::string, std::string>>& modes);
 
     ResultFunc mOnResult;
 };
@@ -2131,6 +2297,58 @@ private:
     }
 
     Completion mCompletion;
+};
+
+class MEGA_API CommandGetMyIP: public Command
+{
+public:
+    using Cb =
+        std::function<void(const Error& /*e*/, string&& /*countryCode*/, string&& /*ipAddress*/)>;
+    CommandGetMyIP(MegaClient*, Cb&& completion = nullptr);
+    bool procresult(Result, JSON&) override;
+
+private:
+    Cb mCompletion;
+};
+
+class MEGA_API CommandSetThrottlingParams: public Command
+{
+public:
+    struct ThrottlingParamsFromAPI
+    {
+        m_off_t updateRateInSeconds{-1};
+        m_off_t maxUploadsBeforeThrottle{-1};
+        m_off_t uploadCounterInactivityTime{-1};
+    };
+
+    using ResultVariant = std::variant<Error, ThrottlingParamsFromAPI>;
+    using Completion = std::function<void(const ResultVariant&)>;
+
+    CommandSetThrottlingParams(const MegaClient&, Completion&& completion);
+    bool procresult(Result, JSON&) override;
+
+private:
+    static std::pair<bool /* parseOk */, std::optional<ThrottlingParamsFromAPI>>
+        parseJson(JSON& json);
+
+    Completion mCompletion;
+};
+
+class MEGA_API CommandGetSubscriptionCancellationDetails: public Command
+{
+public:
+    using CompletionCallback = std::function<void(const Error& /*e*/,
+                                                  string&& /*originalTransactionId*/,
+                                                  int /*expiresDate*/,
+                                                  int /*cancelledDate*/)>;
+    CommandGetSubscriptionCancellationDetails(MegaClient*,
+                                              const char* originalTransactionId,
+                                              unsigned int gatewayId,
+                                              CompletionCallback&& completion = nullptr);
+    bool procresult(Result, JSON&) override;
+
+private:
+    CompletionCallback mCompletion;
 };
 
 } // namespace

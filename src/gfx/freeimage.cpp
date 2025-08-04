@@ -22,7 +22,10 @@
 #include "mega/gfx/freeimage.h"
 
 #include "mega.h"
+#include "mega/logging.h"
 #include "mega/scoped_helpers.h"
+
+#include <optional>
 
 #ifdef USE_FREEIMAGE
 
@@ -36,11 +39,6 @@ typedef const wchar_t freeimage_filename_char_t;
 typedef const char freeimage_filename_char_t;
 #endif
 
-#if FREEIMAGE_MAJOR_VERSION < 3 || FREEIMAGE_MINOR_VERSION < 13
-#define OLD_FREEIMAGE
-#endif
-
-
 #ifdef HAVE_FFMPEG
 extern "C" {
 #include <libavformat/avformat.h>
@@ -53,33 +51,326 @@ extern "C" {
 }
 #endif
 
+namespace
+{
+
+struct FIBITMAPDeleter
+{
+    void operator()(FIBITMAP* dib) const
+    {
+        FreeImage_Unload(dib);
+    }
+};
+
+using FIBITMAPPtr = std::unique_ptr<FIBITMAP, FIBITMAPDeleter>;
+
+// Rescale the image and convert it to standard FIT_BITMAP
+// @ return nullptr if it fails, otherwise the pointer to the new rescaled image
+FIBITMAPPtr rescale(FIBITMAP* dib, int width, int height)
+{
+    const FREE_IMAGE_TYPE image_type = FreeImage_GetImageType(dib);
+
+    auto thumbnail = [image_type, dib, width, height]() -> FIBITMAPPtr
+    {
+        switch (image_type)
+        {
+            case FIT_BITMAP:
+            case FIT_UINT16:
+            case FIT_RGB16:
+            case FIT_RGBA16:
+            case FIT_FLOAT:
+            case FIT_RGBF:
+            case FIT_RGBAF:
+                return FIBITMAPPtr{FreeImage_Rescale(dib, width, height, FILTER_BILINEAR)};
+            default:
+                // Other types are not supported by freeimage
+                return nullptr;
+        }
+    }();
+
+    if (!thumbnail || image_type == FIT_BITMAP)
+        return thumbnail;
+
+    // Convert these non standard bitmap to a standard bitmap FIT_BITMAP
+    switch (image_type)
+    {
+        case FIT_UINT16:
+            return FIBITMAPPtr{FreeImage_ConvertTo8Bits(thumbnail.get())};
+        case FIT_RGB16:
+            return FIBITMAPPtr{FreeImage_ConvertTo24Bits(thumbnail.get())};
+        case FIT_RGBA16:
+            return FIBITMAPPtr{FreeImage_ConvertTo32Bits(thumbnail.get())};
+        case FIT_FLOAT:
+            return FIBITMAPPtr{FreeImage_ConvertToStandardType(thumbnail.get(), TRUE)};
+        case FIT_RGBF:
+            return FIBITMAPPtr{FreeImage_ToneMapping(thumbnail.get(), FITMO_DRAGO03)};
+        case FIT_RGBAF:
+        {
+            FIBITMAPPtr rgbf{FreeImage_ConvertToRGBF(thumbnail.get())};
+            return FIBITMAPPtr{FreeImage_ToneMapping(rgbf.get(), FITMO_DRAGO03)};
+        }
+        default:
+            return nullptr;
+    };
+}
+
+using FITAGPtr = std::unique_ptr<FITAG, decltype(&FreeImage_DeleteTag)>;
+
+FITAGPtr getTagClone(FREE_IMAGE_MDMODEL model, FIBITMAP* dib, const char* key)
+{
+    FITAG* searchedTag = nullptr;
+    FreeImage_GetMetadata(model, dib, key, &searchedTag);
+    return ::mega::makeUniqueFrom(FreeImage_CloneTag(searchedTag), &FreeImage_DeleteTag);
+}
+
+FITAG* getTag(FREE_IMAGE_MDMODEL model, FIBITMAP* dib, const char* key)
+{
+    FITAG* searchedTag = nullptr;
+    FreeImage_GetMetadata(model, dib, key, &searchedTag);
+    return searchedTag;
+}
+
+void removeAllMetadata(FIBITMAP* dib)
+{
+    if (!dib)
+        return;
+
+    FreeImage_SetMetadata(FIMD_COMMENTS, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_EXIF_MAIN, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_EXIF_EXIF, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_EXIF_GPS, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_EXIF_MAKERNOTE, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_EXIF_INTEROP, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_IPTC, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_XMP, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_GEOTIFF, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_ANIMATION, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_CUSTOM, dib, nullptr, nullptr);
+    FreeImage_SetMetadata(FIMD_EXIF_RAW, dib, nullptr, nullptr);
+}
+
+std::pair<FREE_IMAGE_FORMAT, int> decideSaveFormatFlag(FIBITMAP* dib, bool pngIsAllowed)
+{
+    return FreeImage_IsTransparent(dib) && pngIsAllowed ?
+               std::make_pair(FIF_PNG, PNG_DEFAULT) :
+               std::make_pair(FIF_JPEG, JPEG_BASELINE | JPEG_OPTIMIZE | 85);
+}
+
+/**
+ * @brief Prepares a standard bitmap image for saving to the target format.
+ *
+ * For JPEG target format, It performs the following steps:
+ *   1. Fills any transparent areas with black.
+ *   2. Converts the image to 24-bit format (required for JPEG).
+ *
+ * @param dib The original standard bitmap image to be processed.
+ * @param format The target format
+ *
+ * @return A pair containing:
+ *   - The converted image (nullptr if no conversion was needed).
+ *   - A boolean indicating if an error occurred:
+ *     - true: An error occurred during processing.
+ *     - false: No error occurred.
+ */
+std::pair<FIBITMAPPtr, bool> prepareImageForSave(FIBITMAP* dib, FREE_IMAGE_FORMAT format)
+{
+    assert(format == FIF_PNG || format == FIF_JPEG);
+
+    // No preparation is needed for PNG
+    if (format != FIF_JPEG)
+        return {nullptr, false};
+
+    // Prepare for JPEG
+    FIBITMAPPtr converted{};
+    if (FreeImage_IsTransparent(dib))
+    {
+        RGBQUAD black{0, 0, 0, 0};
+        converted.reset(FreeImage_Composite(dib, FALSE, &black));
+        if (!converted)
+        {
+            LOG_err << "FreeImage Composite error";
+            return {nullptr, true};
+        }
+
+        dib = converted.get();
+    }
+
+    if (FreeImage_GetBPP(dib) != 24)
+    {
+        converted.reset(FreeImage_ConvertTo24Bits(dib));
+        if (!converted)
+        {
+            LOG_err << "FreeImage ConvertTo24Bits error";
+            return {nullptr, true};
+        }
+    }
+
+    return {std::move(converted), false};
+}
+
+std::string saveToMemory(FIBITMAP* dib, FREE_IMAGE_FORMAT format, int flag)
+{
+    // Allocate Memory and Save
+    const auto hmem = ::mega::makeUniqueFrom(FreeImage_OpenMemory(),
+                                             [](FIMEMORY* p)
+                                             {
+                                                 FreeImage_CloseMemory(p);
+                                             });
+    if (!hmem)
+        return {};
+
+    if (!FreeImage_SaveToMemory(format, dib, hmem.get(), flag))
+        return {};
+
+    // To string
+    BYTE* tdata;
+    DWORD tlen;
+    FreeImage_AcquireMemory(hmem.get(), &tdata, &tlen);
+    return std::string{reinterpret_cast<char*>(tdata), tlen};
+}
+
+// Save the standard bitmap image in jpeg or png format.
+std::string saveToJpegOrPng(FIBITMAP* dib, bool pngIsAllowed)
+{
+    if (!dib)
+        return {};
+
+    assert(FreeImage_GetImageType(dib) == FIT_BITMAP);
+
+    const auto [format, flag] = decideSaveFormatFlag(dib, pngIsAllowed);
+
+    const auto [converted, hasError] = prepareImageForSave(dib, format);
+
+    if (hasError)
+        return {};
+
+    // Point to the converted image
+    if (converted)
+        dib = converted.get();
+
+    return saveToMemory(dib, format, flag);
+}
+
+std::optional<WORD> getOrientation(FIBITMAP* dib)
+{
+    FITAG* tag = getTag(FIMD_EXIF_MAIN, dib, "Orientation");
+
+    // Invalid
+    if (!tag || (FreeImage_GetTagID(tag) != 0x112) || (FreeImage_GetTagType(tag) != FIDT_SHORT))
+    {
+        return std::nullopt;
+    }
+
+    return *((const WORD*)FreeImage_GetTagValue(tag));
+}
+
+//
+// It may rotate the image based on EXIF orientation tag. It may release the original image and
+// update the pointer to the new rotated image.
+//
+FIBITMAPPtr rotateOnExifOrientation(FIBITMAPPtr dib)
+{
+    const auto orientation = getOrientation(dib.get());
+    if (!orientation.has_value())
+        return dib;
+
+    // Helper: rotate, release the original, and update the pointer to the new rotated one
+    auto rotate = [](FIBITMAPPtr dib, double degree)
+    {
+        if (auto rotated = FreeImage_Rotate(dib.get(), degree); rotated)
+        {
+            dib.reset(rotated);
+        }
+        return dib;
+    };
+
+    switch (orientation.value())
+    {
+        case 1: // Normal
+            break;
+        case 2: // Mirror horizontal
+            FreeImage_FlipHorizontal(dib.get());
+            break;
+        case 3: // Rotate 180
+            dib = rotate(std::move(dib), 180);
+            break;
+        case 4: // Mirror vertical
+            FreeImage_FlipVertical(dib.get());
+            break;
+        case 5: // Mirror horizontal and rotate 270 CW
+            dib = rotate(std::move(dib), 90);
+            FreeImage_FlipVertical(dib.get());
+            break;
+        case 6: // Rotate 90 CW
+            dib = rotate(std::move(dib), -90);
+            break;
+        case 7: // Mirror horizontal and rotate 90 CW
+            dib = rotate(std::move(dib), -90);
+            FreeImage_FlipVertical(dib.get());
+            break;
+        case 8: // Rotate 270 CW
+            dib = rotate(std::move(dib), 90);
+            break;
+        default:
+            break;
+    }
+
+    return dib;
+}
+}
+
 namespace mega {
 
 #if defined(HAVE_FFMPEG) || defined(HAVE_PDFIUM)
 std::mutex GfxProviderFreeImage::gfxMutex;
 #endif
 
+std::mutex FreeImageInstance::mLock;
+std::size_t FreeImageInstance::mNumReferences = 0;
+
+FreeImageInstance::FreeImageInstance()
+{
+    std::lock_guard<std::mutex> guard(mLock);
+
+    // Make sure reference count doesn't overflow.
+    assert(mNumReferences < std::numeric_limits<std::size_t>::max());
+
+    // Increment reference counter.
+    ++mNumReferences;
+
 #ifdef FREEIMAGE_LIB
-std::mutex GfxProviderFreeImage::libFreeImageInitializedMutex;
-unsigned GfxProviderFreeImage::libFreeImageInitialized = 0;
-#endif
+    // Iniitalize if necessary.
+    if (mNumReferences == 1)
+    {
+        FreeImage_Initialise(TRUE);
+    }
+#endif // FREEIMAGE_LIB
+}
+
+FreeImageInstance::~FreeImageInstance()
+{
+    std::lock_guard<std::mutex> guard(mLock);
+
+    // Make sure reference count doesn't borrow.
+    assert(mNumReferences > 0);
+
+    // Decrement reference counter.
+    --mNumReferences;
+
+#ifdef FREEIMAGE_LIB
+    // Deinitialize if necessary.
+    if (mNumReferences == 0)
+    {
+        FreeImage_DeInitialise();
+    }
+#endif // FREEIMAGE_LIB
+}
 
 GfxProviderFreeImage::GfxProviderFreeImage()
 {
     dib = NULL;
     w = 0;
     h = 0;
-
-#ifdef FREEIMAGE_LIB
-    {
-        std::unique_lock<std::mutex> guard(libFreeImageInitializedMutex);
-        if (!libFreeImageInitialized)
-        {
-            FreeImage_Initialise(TRUE);
-            libFreeImageInitialized++;
-        }
-    }
-#endif
 
 #ifdef HAVE_PDFIUM
     pdfiumInitialized = false;
@@ -92,17 +383,6 @@ GfxProviderFreeImage::GfxProviderFreeImage()
 
 GfxProviderFreeImage::~GfxProviderFreeImage()
 {
-#ifdef FREEIMAGE_LIB
-    {
-        std::unique_lock<std::mutex> guard(libFreeImageInitializedMutex);
-        if (libFreeImageInitialized)
-        {
-            FreeImage_DeInitialise();
-            libFreeImageInitialized--;
-        }
-    }
-#endif
-
 #ifdef HAVE_PDFIUM
     gfxMutex.lock();
     if (pdfiumInitialized)
@@ -116,7 +396,8 @@ GfxProviderFreeImage::~GfxProviderFreeImage()
 #ifdef USE_MEDIAINFO
 bool GfxProviderFreeImage::readbitmapMediaInfo(const LocalPath& imagePath)
 {
-    const StringPair& cover = MediaProperties::getCoverFromId3v2(imagePath.localpath);
+    string_type imgPathStr = imagePath.asPlatformEncoded(false);
+    const StringPair& cover = MediaProperties::getCoverFromId3v2(imgPathStr);
     if (cover.first.empty())
     {
         return false;
@@ -160,39 +441,40 @@ bool GfxProviderFreeImage::readbitmapMediaInfo(const LocalPath& imagePath)
 
 bool GfxProviderFreeImage::readbitmapFreeimage(const LocalPath& imagePath, int size)
 {
-
     // FIXME: race condition, need to use open file instead of filename
-    FREE_IMAGE_FORMAT fif = FreeImage_GetFileTypeX(imagePath.localpath.c_str());
+    FREE_IMAGE_FORMAT fif = FreeImage_GetFileTypeX(imagePath.asPlatformEncoded(false).c_str());
 
     if (fif == FIF_UNKNOWN)
     {
         return false;
     }
 
-#ifndef OLD_FREEIMAGE
-    if (fif == FIF_JPEG)
+    // Load flag
+    const auto flag = [fif, size]()
     {
-        // load JPEG (scale & EXIF-rotate)
-        if (!(dib = FreeImage_LoadX(fif, imagePath.localpath.c_str(),
-                                    JPEG_EXIFROTATE | JPEG_FAST | (size << 16))))
+        switch (fif)
         {
-            return false;
+            case FIF_JPEG:
+                return JPEG_FAST | (size << 16);
+            case FIF_RAW:
+                return RAW_PREVIEW;
+            default:
+                return 0;
         }
-    }
-    else
-#endif
+    }();
+
+    // Load
+    dib = FreeImage_LoadX(fif, imagePath.asPlatformEncoded(false).c_str(), flag);
+    if (!dib)
     {
-        // load all other image types - for RAW formats, rely on embedded preview
-        if (!(dib = FreeImage_LoadX(fif, imagePath.localpath.c_str(),
-#ifndef OLD_FREEIMAGE
-                                    (fif == FIF_RAW) ? RAW_PREVIEW : 0)))
-#else
-                                    0)))
-#endif
-        {
-            return false;
-        }
+        return false;
     }
+
+    // Rotate first
+    dib = rotateOnExifOrientation(FIBITMAPPtr{dib}).release();
+
+    // Remove Metadata after
+    removeAllMetadata(dib);
 
     w = static_cast<int>(FreeImage_GetWidth(dib));
     h = static_cast<int>(FreeImage_GetHeight(dib));
@@ -202,10 +484,12 @@ bool GfxProviderFreeImage::readbitmapFreeimage(const LocalPath& imagePath, int s
 
 #ifdef HAVE_FFMPEG
 
+#if LIBAVCODEC_VERSION_MAJOR < 60
 #ifdef AV_CODEC_CAP_TRUNCATED
 #define CAP_TRUNCATED AV_CODEC_CAP_TRUNCATED
 #else
 #define CAP_TRUNCATED CODEC_CAP_TRUNCATED
+#endif
 #endif
 
 const char *GfxProviderFreeImage::supportedformatsFfmpeg()
@@ -220,14 +504,15 @@ const char *GfxProviderFreeImage::supportedformatsFfmpeg()
 bool GfxProviderFreeImage::isFfmpegFile(const string& ext)
 {
     const char* ptr;
-    if ((ptr = strstr(supportedformatsFfmpeg(), ext.c_str())) && ptr[ext.size()] == '.')
+    ptr = strstr(supportedformatsFfmpeg(), ext.c_str());
+    if (ptr && ptr[ext.size()] == '.')
     {
         return true;
     }
     return false;
 }
 
-bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int size)
+bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int /*size*/)
 {
 #ifndef DEBUG
     av_log_set_level(AV_LOG_PANIC);
@@ -263,7 +548,7 @@ bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int size
         if (formatContext->streams[i]->codecpar && formatContext->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
         {
             videoStream = formatContext->streams[i];
-            videoStreamIdx = i;
+            videoStreamIdx = static_cast<int>(i);
             break;
         }
     }
@@ -309,11 +594,12 @@ bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int size
 
     // Force seeking to key frames
     formatContext->seek2any = false;
+#if LIBAVCODEC_VERSION_MAJOR < 60
     if (decoder->capabilities & CAP_TRUNCATED)
     {
         codecContext->flags |= CAP_TRUNCATED;
     }
-
+#endif
     AVPixelFormat sourcePixelFormat = static_cast<AVPixelFormat>(codecParm->format);
     AVPixelFormat targetPixelFormat = AV_PIX_FMT_BGR24; //raw data expected by freeimage is in this format
     SwsContext* swsContext = sws_getContext(width, height, sourcePixelFormat,
@@ -387,22 +673,89 @@ bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int size
     packet.data = NULL;
     packet.size = 0;
 
+    // Compute the video's rotation.
+    auto rotation = [&]()
+    {
+        uint8_t* matrix = nullptr;
+#if LIBAVCODEC_VERSION_MAJOR < 60
+        // Retrieve the video's display matrix.
+        matrix = av_stream_get_side_data(videoStream, AV_PKT_DATA_DISPLAYMATRIX, nullptr);
+#else
+        const AVPacketSideData* packet_side_data =
+            av_packet_side_data_get(videoStream->codecpar->coded_side_data,
+                                    videoStream->codecpar->nb_coded_side_data,
+                                    AV_PKT_DATA_DISPLAYMATRIX);
+        if (packet_side_data)
+        {
+            matrix = packet_side_data->data;
+        }
+#endif
+        // No display matrix? No rotation.
+        if (!matrix)
+        {
+            return 0;
+        }
+
+        // Retrieve the video's rotation.
+        return (int)av_display_rotation_get((int32_t*)matrix);
+    }();
+
     int scalingResult;
     int actualNumFrames = 0;
+    int result = 0;
 
     // Read frames until succesfull decodification or reach limit of 220 frames
-    while (actualNumFrames < 220 && av_read_frame(formatContext, &packet) >= 0)
+    while (actualNumFrames < 220 && result != AVERROR_EOF)
     {
+        // Try and read a packet from the file.
+        result = av_read_frame(formatContext, &packet);
+
+        // Couldn't read a packet from the file due to some (hard) error.
+        //
+        // Note that we don't break here if we couldn't read a packet
+        // because we hit the end of the file. This is because in this case,
+        // the packet will be a dummy which we'll feed into the codec below.
+        if (result < 0 && result != AVERROR_EOF)
+        {
+            break;
+        }
+
+        // Make sure any data contained in the packet is released at the end
+        // of this iteration.
         auto avPacketGuard = makeUniqueFrom(&packet, av_packet_unref);
+
+        // We're only interested in video packets.
         if (packet.stream_index == videoStream->index)
         {
-            int ret = avcodec_send_packet(codecContext, &packet);
-            if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+            // Feed the packet we retrieved from the file into our codec.
+            //
+            // Note that the packet we feed into the codec will be a dummy
+            // if we hit the end of the file. The reason we still need to
+            // process this dummy packet is that doing so will put the codec
+            // into "drain mode."
+            //
+            // This is necessary because even though we've hit the end of
+            // the file, the codec may still contain frames for us to
+            // process.
+            result = avcodec_send_packet(codecContext, &packet);
+
+            // Encountered a hard error passing the packet to the codec.
+            if (result < 0 && result != AVERROR(EAGAIN) && result != AVERROR_EOF)
             {
                 break;
             }
 
-            while (avcodec_receive_frame(codecContext, videoFrame) >= 0)
+            // Keep extracting decoded frames from the codec for as long as
+            // we can. If we haven't hit the end of the file, this function
+            // will return EAGAIN which means it needs us to feed the codec
+            // more packets. If the function returns EOF, it means that the
+            // codec has been drained and no further decoded frames are
+            // possible.
+            //
+            // Note that this function can only return EOF if the codec had
+            // entered "draining mode." That is, it'll only happen if
+            // av_read_frame above also returned EOF.
+            while ((result = avcodec_receive_frame(codecContext, videoFrame)) >= 0)
             {
                 if (sourcePixelFormat != codecContext->pix_fmt)
                 {
@@ -418,7 +771,7 @@ bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int size
                     const int legacy_align = 1;
                     int imagesize = av_image_get_buffer_size(targetPixelFormat, width, height, legacy_align);
                     FIMEMORY fmemory;
-                    fmemory.data = malloc(imagesize);
+                    fmemory.data = malloc(static_cast<size_t>(imagesize));
                     if (!fmemory.data)
                     {
                         LOG_warn << "Error allocating image copy buffer";
@@ -434,30 +787,52 @@ bool GfxProviderFreeImage::readbitmapFfmpeg(const LocalPath& imagePath, int size
                         return false;
                     }
 
-                    //int pitch = imagesize/height;
-                    int pitch = width*3;
+                    int pitch = width * 3;
 
-                    if (!(dib = FreeImage_ConvertFromRawBits((BYTE*)fmemory.data,width,height,
-                                                             pitch, 24, FI_RGBA_RED_SHIFT, FI_RGBA_GREEN_MASK,
-                                                             FI_RGBA_BLUE_MASK | 0xFFFF, TRUE) ) )
+                    // Assume we can't generate the image from our raw frame.
+                    w = 0;
+                    h = 0;
+
+                    // Try and generate an image from our raw frame.
+                    (dib = FreeImage_ConvertFromRawBits((BYTE*)fmemory.data,
+                                                        width,
+                                                        height,
+                                                        pitch,
+                                                        24,
+                                                        FI_RGBA_RED_SHIFT,
+                                                        FI_RGBA_GREEN_MASK,
+                                                        FI_RGBA_BLUE_MASK | 0xFFFF,
+                                                        TRUE));
+                    if (!dib)
                     {
                         LOG_warn << "Error loading freeimage from memory: " << imagePath;
+                        return false;
                     }
-                    else
+
+                    // Invert any rotation if necessary.
+                    if (rotation)
                     {
-                        LOG_verbose << "SUCCESS loading freeimage from memory: "<< imagePath;
+                        if (auto* temp = FreeImage_Rotate(dib, rotation))
+                        {
+                            FreeImage_Unload(dib);
+                            dib = temp;
+                        }
+                        else
+                        {
+                            LOG_warn << "Couldn't remove rotation from image: " << imagePath;
+                        }
                     }
+
+                    w = static_cast<int>(FreeImage_GetWidth(dib));
+                    h = static_cast<int>(FreeImage_GetHeight(dib));
 
                     LOG_debug << "Video image ready";
-
-                    w = FreeImage_GetWidth(dib);
-                    h = FreeImage_GetHeight(dib);
 
                     return w > 0 && h > 0;
                 }
             }
 
-           actualNumFrames++;
+            actualNumFrames++;
         }
     }
 
@@ -477,14 +852,15 @@ const char* GfxProviderFreeImage::supportedformatsPDF()
 bool GfxProviderFreeImage::isPdfFile(const string &ext)
 {
     const char* ptr;
-    if ((ptr = strstr(supportedformatsPDF(), ext.c_str())) && ptr[ext.size()] == '.')
+    ptr = strstr(supportedformatsPDF(), ext.c_str());
+    if (ptr && ptr[ext.size()] == '.')
     {
         return true;
     }
     return false;
 }
 
-bool GfxProviderFreeImage::readbitmapPdf(const LocalPath& imagePath, int size)
+bool GfxProviderFreeImage::readbitmapPdf(const LocalPath& imagePath, int /*size*/)
 {
     std::lock_guard<std::mutex> g(gfxMutex);
     if (!pdfiumInitialized)
@@ -603,10 +979,8 @@ bool GfxProviderFreeImage::readbitmap(const LocalPath& localname, int size)
     return true;
 }
 
-bool GfxProviderFreeImage::resizebitmap(int rw, int rh, string* jpegout)
+bool GfxProviderFreeImage::resizebitmap(int rw, int rh, string* imageOut, Hint hint)
 {
-    FIBITMAP* tdib;
-    FIMEMORY* hmem;
     int px, py;
 
     if (!w || !h) return false;
@@ -617,52 +991,31 @@ bool GfxProviderFreeImage::resizebitmap(int rw, int rh, string* jpegout)
 
     if (!w || !h) return false;
 
-    jpegout->clear();
+    imageOut->clear();
 
-    if ((tdib = FreeImage_Rescale(dib, w, h, FILTER_BILINEAR)))
+    // Rescale
+    if (auto rescaled = rescale(dib, w, h); rescaled)
     {
         FreeImage_Unload(dib);
-
-        dib = tdib;
-
-        if ((tdib = FreeImage_Copy(dib, px, py, px + rw, py + rh)))
-        {
-            FreeImage_Unload(dib);
-
-            dib = tdib;
-
-            WORD bpp = (WORD)FreeImage_GetBPP(dib);
-            if (bpp != 24) {
-                if ((tdib = FreeImage_ConvertTo24Bits(dib)) == NULL) {
-                    FreeImage_Unload(dib);
-                    dib = tdib;
-                    return 0;
-                }
-                FreeImage_Unload(dib);
-                dib = tdib;
-            }
-
-            if ((hmem = FreeImage_OpenMemory()))
-            {
-                if (FreeImage_SaveToMemory(FIF_JPEG, dib, hmem,
-                #ifndef OLD_FREEIMAGE
-                    JPEG_BASELINE | JPEG_OPTIMIZE |
-                #endif
-                    85))
-                {
-                    BYTE* tdata;
-                    DWORD tlen;
-
-                    FreeImage_AcquireMemory(hmem, &tdata, &tlen);
-                    jpegout->assign((char*)tdata, tlen);
-                }
-
-                FreeImage_CloseMemory(hmem);
-            }
-        }
+        dib = rescaled.release();
+    }
+    else
+    {
+        return false;
     }
 
-    return !jpegout->empty();
+    // copy part
+    auto tdib = FreeImage_Copy(dib, px, py, px + rw, py + rh);
+    if (!tdib)
+    {
+        return false;
+    }
+    FreeImage_Unload(dib);
+    dib = tdib;
+
+    *imageOut = saveToJpegOrPng(dib, hint == Hint::FORMAT_PNG);
+
+    return !imageOut->empty();
 }
 
 void GfxProviderFreeImage::freebitmap()

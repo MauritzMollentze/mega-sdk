@@ -43,6 +43,20 @@ std::vector<std::string> stringListToVector(const MegaStringList& l)
     return result;
 }
 
+std::map<std::string, int64_t> stringIntegerMapToMap(const MegaStringIntegerMap& m)
+{
+    std::map<std::string, int64_t> result;
+    std::unique_ptr<MegaStringList> keys{m.getKeys()};
+    if (!keys)
+        return {};
+    for (int i = 0; i < keys->size(); ++i)
+    {
+        const auto& key = keys->get(i);
+        result[key] = m.get(key)->get(0);
+    }
+    return result;
+}
+
 std::vector<std::vector<std::string>> bucketsToVector(const MegaRecentActionBucketList& buckets)
 {
     std::vector<std::vector<std::string>> result;
@@ -60,4 +74,17 @@ std::vector<std::vector<std::string>> bucketsToVector(const MegaRecentActionBuck
     }
     return result;
 }
+
+#ifdef ENABLE_SYNC
+std::vector<std::unique_ptr<MegaSyncStall>> toSyncStallVector(const MegaSyncStallList& stallList)
+{
+    std::vector<std::unique_ptr<MegaSyncStall>> result;
+    result.reserve(stallList.size());
+    for (size_t i = 0; i < stallList.size(); ++i)
+    {
+        result.emplace_back(std::unique_ptr<MegaSyncStall>(stallList.get(i)->copy()));
+    }
+    return result;
+}
+#endif
 }

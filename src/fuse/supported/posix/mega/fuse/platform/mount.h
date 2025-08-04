@@ -4,14 +4,16 @@
 #include <memory>
 #include <vector>
 
-#include <mega/fuse/common/activity_monitor.h>
+#include <mega/common/activity_monitor.h>
+#include <mega/common/normalized_path.h>
+#include <mega/common/task_executor.h>
+#include <mega/common/task_executor_flags_forward.h>
 #include <mega/fuse/common/inode_forward.h>
 #include <mega/fuse/common/inode_forward.h>
-#include <mega/fuse/common/mount_inode_id_forward.h>
+#include <mega/fuse/common/logger.h>
 #include <mega/fuse/common/mount.h>
+#include <mega/fuse/common/mount_inode_id_forward.h>
 #include <mega/fuse/common/tags.h>
-#include <mega/fuse/common/task_executor_flags_forward.h>
-#include <mega/fuse/common/task_executor.h>
 #include <mega/fuse/platform/inode_invalidator.h>
 #include <mega/fuse/platform/library.h>
 #include <mega/fuse/platform/mount_forward.h>
@@ -29,6 +31,7 @@ class Mount final
   : public fuse::Mount
 {
     friend class Session;
+    friend class SessionBase;
 
     void access(Request request,
                 MountInodeID inode,
@@ -41,27 +44,31 @@ class Mount final
                   std::function<Error(InodeRef)> predicate,
                   const std::string& name);
 
-    template<typename... Arguments, typename... Parameters>
-    void execute(void (Mount::*callback)(Parameters...),
+    template<typename Callback, typename... Arguments>
+    static constexpr auto IsMountCallbackV =
+      std::is_invocable_r_v<void, Callback, Mount*, Arguments...>;
+
+    template<typename... Arguments,
+             typename Callback>
+    auto execute(Callback callback,
                  bool spawnWorker,
                  Arguments&&... arguments)
+      -> std::enable_if_t<IsMountCallbackV<Callback, Arguments...>>
     {
-        using Callback = std::function<void()>;
-        using Wrapper = std::function<void(const Task&)>;
-
-        Callback callback_ =
+        std::function<void()> callback_ =
           std::bind(callback,
                     this,
                     std::forward<Arguments>(arguments)...);
 
-        auto wrapper = [](Activity, Callback& callback, const Task&) {
+        auto wrapper = [](common::Activity, auto& callback, const common::Task&) {
             callback();
         }; // wrapper
 
-        Wrapper wrapper_ = std::bind(std::move(wrapper),
-                                     mActivities.begin(),
-                                     std::move(callback_),
-                                     std::placeholders::_1);
+        std::function<void(const common::Task&)> wrapper_ =
+            std::bind(std::move(wrapper),
+                      mActivities.begin(),
+                      std::move(callback_),
+                      std::placeholders::_1);
 
         mExecutor.execute(std::move(wrapper_), spawnWorker);
     }
@@ -131,7 +138,8 @@ class Mount final
                 MountInodeID sourceParent,
                 const std::string& sourceName,
                 MountInodeID targetParent,
-                const std::string& targetName);
+                const std::string& targetName,
+                unsigned int flags);
 
     void rmdir(Request request,
                MountInodeID parent,
@@ -156,10 +164,13 @@ class Mount final
                fuse_file_info& info);
 
     // Tracks whether any requests are in progress.
-    ActivityMonitor mActivities;
+    common::ActivityMonitor mActivities;
 
     // Responsible for performing requests.
-    TaskExecutor mExecutor;
+    common::TaskExecutor mExecutor;
+
+    // Where is the mount mounted?
+    common::NormalizedPath mPath;
 
     // How this mount communicates with libfuse.
     Session mSession;
@@ -174,7 +185,7 @@ public:
     ~Mount();
 
     // Update this mount's executor flags.
-    void executorFlags(const TaskExecutorFlags& flags) override;
+    void executorFlags(const common::TaskExecutorFlags& flags) override;
 
     // Invalidate an inode's attributes.
     void invalidateAttributes(InodeID id) override;
@@ -199,6 +210,9 @@ public:
 
     // Translate a system-wide inode ID to a mount-specific inode ID.
     MountInodeID map(InodeID id) const override;
+
+    // What local path is this mount mapping from?
+    common::NormalizedPath path() const override;
 }; // Mount
 
 } // platform

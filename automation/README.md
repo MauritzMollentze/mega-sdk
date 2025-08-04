@@ -9,8 +9,7 @@ Fill the details in `[make_release]` section of your `config.toml` local copy of
 
 You will also need to set the following environment variables to make the script work:
 - `GITLAB_TOKEN`
-- `JIRA_USERNAME`
-- `JIRA_PASSWORD`
+- `JIRA_TOKEN`
 - `SLACK_TOKEN`
 - `GPG_KEYGRIP`
 - `GPG_PASSWORD`
@@ -30,12 +29,10 @@ Fill the details in `[close_release]` section of your `config.toml` local copy o
 
 You will also need to set the following environment variables to make the script work:
 - `GITLAB_TOKEN`
-- `JIRA_USERNAME`
-- `JIRA_PASSWORD`
+- `JIRA_TOKEN`
 - `SLACK_TOKEN`
 - `GITHUB_TOKEN`
-- `CONFLUENCE_USER`
-- `CONFLUENCE_PASSWORD`
+- `CONFLUENCE_TOKEN`
 
 
 From a directory in the repo (!) for which we intend to close a release, run:
@@ -51,8 +48,7 @@ Fill the details in `[patch_release]` section of your `config.toml` local copy o
 
 You will also need to set the following environment variables to make the script work:
 - `GITLAB_TOKEN`
-- `JIRA_USERNAME`
-- `JIRA_PASSWORD`
+- `JIRA_TOKEN`
 - `SLACK_TOKEN`
 - `GPG_KEYGRIP`
 - `GPG_PASSWORD`
@@ -68,8 +64,7 @@ Fill the details in `[make_another_rc]` section of your `config.toml` local copy
 
 You will also need to set the following environment variables to make the script work:
 - `GITLAB_TOKEN`
-- `JIRA_USERNAME`
-- `JIRA_PASSWORD`
+- `JIRA_TOKEN`
 - `SLACK_TOKEN`
 
 > Note that the number of the new RC will be automatically determined, from the last RC already existing for that Release plus 1.
@@ -104,6 +99,9 @@ These should only be needed once.
 * Remember to check from time to time that the token has not expired.
 
 ### Slack stuff
+
+##### Setup app
+
 * Slack requires an _app_ that will provide a token required for using its API.
   * Any Slack user can create an app, configure the scope for it, and get the necessary token:
     * [Go to Your Apps](https://api.slack.com/apps)
@@ -117,6 +115,12 @@ These should only be needed once.
   * Or reuse a _distributed app_ created by someone else, and get whatever token they provide.
 * Set the token in `slack_token` argument(s) inside `config.toml`.
 * Update the env var when the token has expired.
+
+##### Find channel and thread to post to
+
+* Channel can be passed by name, as in `#foo_bar` without the `#` prefix. Another option is to pass it by id, which can be obtained from the web url. The web url of a channel (or direct message) looked like `https://app.slack.com/client/AAAAAAAAA/BBBBBBBBBBB`. The `BBBBBBBBBBB` component is the channel id.
+* Thread id can be obtained from the web url of the message in a channel, considered the root of a thread. The web url of such a message looked like `https://megaconz.slack.com/archives/BBBBBBBBBBB/pTTTTTTTTTTTTTTTT`. The `TTTTTTTTTTTTTTTT` component needs to be split by a `.` into a 10.6 string. The result is the thread id, as `TTTTTTTTTT.TTTTTT`.
+
 
 ### Confluence stuff
 * This is optional. If Confluence details are not provided, the rotation of Release Captain will not be executed.

@@ -127,6 +127,9 @@ namespace mega {
         // calculate the exact size of each of the 6 parts of a raid file.  Some may not have a full last sector
         static m_off_t raidPartSize(unsigned part, m_off_t fullfilesize);
 
+        // calculates the module between a given offset and a RAIDLINE.
+        static m_off_t offsetToRaidLine(const m_off_t offset);
+
         // report a failed connection.  The function tries to switch to 5 connection raid or a different 5 connections.  Two fails without progress and we should fail the transfer as usual
         bool tryRaidHttpGetErrorRecovery(unsigned errorConnectionNum, bool incrementErrors);
 
@@ -152,12 +155,13 @@ namespace mega {
         enum { RaidReadAheadChunksPausePoint = 8 };
         enum { RaidReadAheadChunksUnpausePoint = 4 };
 
-        bool is_raid;
-        bool is_newRaid;
-        bool raidKnown;
-        m_off_t deliverlimitpos;   // end of the data that the client requested
-        m_off_t acquirelimitpos;   // end of the data that we need to deliver that (can be up to the next raidline boundary)
-        m_off_t fullfilesize;      // end of the file
+        bool is_raid{};
+        bool is_newRaid{};
+        bool raidKnown{};
+        m_off_t deliverlimitpos{}; // end of the data that the client requested
+        m_off_t acquirelimitpos{}; // end of the data that we need to deliver that (can be up to the
+                                   // next raidline boundary)
+        m_off_t fullfilesize{}; // end of the file
 
         // controls buffer sizes used
         unsigned raidLinesPerChunk;

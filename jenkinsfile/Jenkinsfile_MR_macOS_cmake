@@ -1,3 +1,41 @@
+def setCommitStatus(String pStatus, String errorHint = '') {
+    switch (pStatus) {
+        case 'running':
+            pState = 'running'
+            pMessage = ""
+            break
+        case 'success':
+            pState = 'success'
+            pMessage = ":white_check_mark: ${env.JOB_NAME} :green_apple: <b>MacOS</b> SUCCEEDED :muscle:<br/>Build results: [Jenkins [${env.BUILD_DISPLAY_NAME}]](${env.RUN_DISPLAY_URL})<br/>Commit: ${env.GIT_COMMIT}"
+            break
+        case 'aborted':
+            pState = 'canceled'
+            pMessage = ":interrobang: ${env.JOB_NAME} :green_apple: <b>MacOS</b> ABORTED :confused:<br/>Build results: [Jenkins [${env.BUILD_DISPLAY_NAME}]](${env.RUN_DISPLAY_URL})<br/>Commit: ${env.GIT_COMMIT}"
+            break
+        case 'build_failure':
+            pState = 'failed'
+            pMessage = ":red_circle: ${env.JOB_NAME} :green_apple: <b>MacOS</b> FAILURE :worried:<br/>Build results: [Jenkins [${env.BUILD_DISPLAY_NAME}]](${env.RUN_DISPLAY_URL})<br/>Commit: ${env.GIT_COMMIT}"
+            break
+        case 'tests_failure':
+            pState = 'failed'
+            pMessage = "🟠 ${env.JOB_NAME} :green_apple: <b>MacOS</b> FAILURE :worried:<br/>Build results: [Jenkins [${env.BUILD_DISPLAY_NAME}]](${env.RUN_DISPLAY_URL})<br/>Commit: ${env.GIT_COMMIT}"
+            break
+        case 'unstable':
+            pState = 'failed'
+            pMessage = ":interrobang: ${env.JOB_NAME} :green_apple: <b>MacOS</b> UNSTABLE :confused:<br/>Build results: [Jenkins [${env.BUILD_DISPLAY_NAME}]](${env.RUN_DISPLAY_URL})<br/>Commit: ${env.GIT_COMMIT}"
+            break
+        default:
+            pState = 'failed'
+            pMessage = ":interrobang: ${env.JOB_NAME} :green_apple: <b>MacOS</b> UNKNOWN :confused:<br/>Build results: [Jenkins [${env.BUILD_DISPLAY_NAME}]](${env.RUN_DISPLAY_URL})<br/>Commit: ${env.GIT_COMMIT}"
+    }
+    if (pMessage) {
+        if (errorHint) {
+            pMessage += '<br/> ' + errorHint
+        }
+        addGitLabMRComment(comment: pMessage)
+    }
+    updateGitlabCommitStatus(name: "${PIPELINE_NAME}", state: pState)
+}
 pipeline {
     agent none
     options {
@@ -7,6 +45,7 @@ pipeline {
 
 
     environment {
+        PIPELINE_NAME = 'Build & test macOS'
         BUILD_OPTIONS = ''
         TESTS_PARALLEL = ''
         APIURL_TO_TEST = ''
@@ -81,6 +120,14 @@ pipeline {
                             sh "echo ${BUILD_OPTIONS}"
                         }
                     }
+                    post {
+                        failure {
+                            script {
+                                setCommitStatus('build_failure', ':warning: Checkout failed')
+                            }
+                            error("Checkout stage failed")
+                        }
+                    }
                 }
                 stage('Build macOS'){
                     options{
@@ -91,23 +138,34 @@ pipeline {
                         VCPKGPATH = "${env.HOME}/jenkins/vcpkg"
                         BUILD_DIR = "build_dir"
                         BUILD_DIR_X64 = "build_dir_x64"
+                        VCPKG_BINARY_SOURCES  = 'clear;x-aws,s3://vcpkg-cache/archives/,readwrite'
+                        AWS_ACCESS_KEY_ID     = credentials('s4_access_key_id_vcpkg_cache')
+                        AWS_SECRET_ACCESS_KEY = credentials('s4_secret_access_key_vcpkg_cache')
+                        AWS_ENDPOINT_URL      = "https://s3.g.s4.mega.io"
+                        MEGAQTPATH = "${env.HOME}/Qt-build/5.15.16/5.15.16"
+                        COMMON_CMAKE_OPTIONS = "-DENABLE_QT_BINDINGS=ON -DENABLE_JAVA_BINDINGS=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_VERBOSE_MAKEFILE=ON -DENABLE_CHAT=ON -DVCPKG_ROOT=${VCPKGPATH} ${BUILD_OPTIONS}"
                     }
                     steps{
                         dir(mac_sources_workspace){
                             //Build SDK for arm64
                             sh "echo Building SDK for arm64"
                             sh "rm -rf ${BUILD_DIR}; mkdir ${BUILD_DIR}"
-                            sh "cmake -DENABLE_SDKLIB_WERROR=ON -DENABLE_CHAT=ON -DCMAKE_BUILD_TYPE=Debug -DVCPKG_ROOT=${VCPKGPATH} ${BUILD_OPTIONS} -DCMAKE_VERBOSE_MAKEFILE=ON \
-                            -S ${mac_sources_workspace} -B ${mac_sources_workspace}/${BUILD_DIR}"
+                            sh "cmake -DCMAKE_PREFIX_PATH=${MEGAQTPATH}/arm64 ${COMMON_CMAKE_OPTIONS} -S ${mac_sources_workspace} -B ${mac_sources_workspace}/${BUILD_DIR}"
                             sh "cmake --build ${mac_sources_workspace}/${BUILD_DIR} -j3"
 
                             //Build SDK for x64
                             sh "echo \"Building SDK for x64 (crosscompiling)\""
                             sh "rm -rf ${BUILD_DIR_X64}; mkdir ${BUILD_DIR_X64}"
-                            sh "cmake -DENABLE_SDKLIB_WERROR=ON -DENABLE_CHAT=ON -DCMAKE_BUILD_TYPE=Debug -DVCPKG_ROOT=${VCPKGPATH} ${BUILD_OPTIONS} -DCMAKE_VERBOSE_MAKEFILE=ON \
-                            -DCMAKE_OSX_ARCHITECTURES=x86_64 -DENABLE_SDKLIB_EXAMPLES=OFF -DENABLE_SDKLIB_TESTS=OFF -DENABLE_ISOLATED_GFX=OFF \
-                            -S ${mac_sources_workspace} -B ${mac_sources_workspace}/${BUILD_DIR_X64}"
+                            sh "cmake -DCMAKE_PREFIX_PATH=${MEGAQTPATH}/x86_64  ${COMMON_CMAKE_OPTIONS} -DCMAKE_OSX_ARCHITECTURES=x86_64 -S ${mac_sources_workspace} -B ${mac_sources_workspace}/${BUILD_DIR_X64}"
                             sh "cmake --build ${mac_sources_workspace}/${BUILD_DIR_X64} -j3"
+                        }
+                    }
+                    post {
+                        failure {
+                            script {
+                                setCommitStatus('build_failure', ':warning: Build failed. Tests won`t run')
+                            }
+                            error("Build stage failed. Tests won't run.")
                         }
                     }
                 }
@@ -149,6 +207,8 @@ pipeline {
                                         ./tools/gfxworker/tests/integration/gfxworker_test_integration &
                                         pid=\$!
                                         wait \$pid || FAILED=2
+                                        gzip -c gfxworker_test_integration.log > gfxworker_test_integration_${BUILD_ID}.log.gz || :
+                                        rm gfxworker_test_integration.log || :
                                     fi
 
                                     if [ -z \"\$FAILED\" ]; then
@@ -198,11 +258,19 @@ pipeline {
                             }
                         }
                     }
+                    post {
+                        failure {
+                            script {
+                                setCommitStatus('tests_failure', ':warning: Build succeed. Tests failed')
+                            }
+                            error("Test stage failed")
+                        }
+                    }
                 }
             }
             post{
                 always {
-                    archiveArtifacts artifacts: 'build_dir/test_integration*log*, build_dir/examples-*.tar.gz', fingerprint: true
+                    archiveArtifacts artifacts: 'build_dir/*test_integration*log*, build_dir/examples-*.tar.gz', fingerprint: true
                     deleteDir()
                 }
             }
@@ -220,10 +288,6 @@ pipeline {
         aborted {
             updateGitlabCommitStatus(name: 'Build & test macOS', state: 'canceled')
             addGitLabMRComment(comment: ":interrobang: ${currentBuild.projectName} :green_apple: <b>macOS</b> ABORTED  :confused:<br/>Build results: [Jenkins [${currentBuild.displayName}]](${currentBuild.absoluteUrl})<br/>Commit: ${COMMIT_ID}" )
-        }
-        failure {
-            updateGitlabCommitStatus(name: 'Build & test macOS', state: 'failed')
-            addGitLabMRComment(comment: ":red_circle: ${currentBuild.projectName} :green_apple: <b>macOS</b> FAILURE  :worried:<br/>Build results: [Jenkins [${currentBuild.displayName}]](${currentBuild.absoluteUrl})<br/>Commit: ${COMMIT_ID}" )                
         }
     }
 }

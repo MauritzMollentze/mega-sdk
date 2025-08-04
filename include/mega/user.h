@@ -26,6 +26,7 @@
 
 namespace mega {
 
+class UserAttribute;
 class UserAttributeManager;
 
 // user/contact
@@ -99,11 +100,19 @@ struct MEGA_API User : public Cacheable
 
     // user's public key
     AsymmCipher pubk;
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4201) // nameless struct
+#endif
     struct
     {
         bool pubkrequested : 1;
         bool isTemporary : 1;
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     // actions to take after arrival of the public key
     deque<std::unique_ptr<PubKeyAction>> pkrs;
@@ -123,19 +132,16 @@ public:
 
     void removepkrs(MegaClient*);
 
-    // attribute methods: set/get/invalidate...
-    void setattr(attr_t at, string *av, string *v);
-    const string *getattr(attr_t at);
-    const string *getattrversion(attr_t at);
-    void invalidateattr(attr_t at);
-    bool isattrvalid(attr_t at);
-    void removeattr(attr_t at, bool ownUser);
-    void removeattr(attr_t at, const string& version);
-    int updateattr(attr_t at, string *av, string *v);
+    // attribute methods: set/get/expire...
+    void setAttribute(attr_t at, const string& value, const string& version);
+    bool updateAttributeIfDifferentVersion(attr_t at, const string& value, const string& version);
+    void setAttributeExpired(attr_t at);
+    const UserAttribute* getAttribute(attr_t at) const;
+    void removeAttribute(attr_t at);
+    void removeAttributeUpdateVersion(attr_t at, const string& version); // remove in up2/upv V3 ?
 
-    // Returns if attribute doesn't exist. Avoid requesting it to server
-    bool nonExistingAttribute(attr_t at) const;
-    // Only mark own attributes that it doesn't exist
+    // Set this to avoid requesting attributes already known to not exist from server.
+    void cacheNonExistingAttributes();
 
     static string attr2string(attr_t at);
     static string attr2longname(attr_t at);
@@ -164,23 +170,25 @@ public:
 
     bool setChanged(attr_t at);
 
-    void setTag(int tag);
+    void setTag(int newTag);
     int getTag();
     void resetTag();
 
     User(const char* = NULL);
     ~User() override;
 
-    // merges the new values in the given TLV. Returns true if TLV is changed.
-    static bool mergeUserAttribute(attr_t type, const string_map &newValuesMap, TLVstore &tlv);
+    // merges the new values in the given destination. Returns true if it was changed.
+    static bool mergeUserAttribute(attr_t type,
+                                   const string_map& newValuesMap,
+                                   string_map& destination);
     static string attributePrefixInTLV(attr_t type, bool modifier);
 };
 
 class AuthRing
 {
 public:
-    // create authring of 'type' from the encrypted TLV container
-    AuthRing(attr_t type, const TLVstore &authring);
+    // create authring of 'type' from the encrypted data
+    AuthRing(attr_t type, const string_map& authring = {});
 
     // create authring of 'type' from the TLV value (undecrypted already, no Type nor Length)
     AuthRing(attr_t type, const string& authring);

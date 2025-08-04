@@ -18,6 +18,7 @@
 
 #include "megafs.h"
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <mega/base64.h>
 #include <mega/db.h>
@@ -726,7 +727,7 @@ TEST_F(SqliteDBTest, RootPath)
 TEST(LocalPath, AppendWithSeparator)
 {
     LocalPath source;
-    LocalPath target;
+    LocalPath target = LocalPath::fromRelativePath("");
 
     // Doesn't add a separator if the target is empty.
     source = LocalPath::fromRelativePath("a");
@@ -905,7 +906,9 @@ TEST(Utils, natural_sorting)
     ASSERT_GT(naturalsorting_compare("100", "20"), 0);
 
     // Comparison between numbers containing zeros at the beginning
-    ASSERT_EQ(naturalsorting_compare("00123", "123"), 0);
+    ASSERT_LT(naturalsorting_compare("0", "00"), 0);
+    ASSERT_LT(naturalsorting_compare("00", "000"), 0);
+    ASSERT_LT(naturalsorting_compare("00123", "123"), 0);
     ASSERT_LT(naturalsorting_compare("00123", "124"), 0);
     ASSERT_GT(naturalsorting_compare("0124", "00123"), 0);
 }
@@ -1193,20 +1196,24 @@ TEST_F(SprintfTest, nulTerminateWhenBufferFull)
     ASSERT_EQ(buf[2], '\0');
 }
 
-TEST_F(SprintfTest, Multiple) {
+TEST_F(SprintfTest, Multiple)
+{
+    std::string buffer(7, '\x0');
 
-    char ebuf[7];
-    snprintf(ebuf, sizeof ebuf, "%s", "1234");
-    // technique developed to used snprintf()
-    char* ptr = strchr(ebuf, 0);
-    snprintf(ptr, sizeof ebuf - (ptr - ebuf), "%s", "ABCDEFGH");
-    ASSERT_EQ(ebuf[0], '1');
-    ASSERT_EQ(ebuf[1], '2');
-    ASSERT_EQ(ebuf[2], '3');
-    ASSERT_EQ(ebuf[3], '4');
-    ASSERT_EQ(ebuf[4], 'A');
-    ASSERT_EQ(ebuf[5], 'B');
-    ASSERT_EQ(ebuf[6], '\0');
+    std::string aToH("ABCDEFGH");
+    std::string countToFour("1234");
+
+    snprintf(buffer.data(), buffer.size(), "%s", countToFour.data());
+
+    snprintf(&buffer[countToFour.size()], buffer.size() - countToFour.size(), "%s", aToH.data());
+
+    ASSERT_EQ(buffer[0], '1');
+    ASSERT_EQ(buffer[1], '2');
+    ASSERT_EQ(buffer[2], '3');
+    ASSERT_EQ(buffer[3], '4');
+    ASSERT_EQ(buffer[4], 'A');
+    ASSERT_EQ(buffer[5], 'B');
+    ASSERT_EQ(buffer[6], '\0');
 }
 
 TEST_F(SprintfTest, ResizeAndPrint) {
@@ -1421,49 +1428,6 @@ TEST(ScopedHelpers, ScopedDestructor)
     EXPECT_EQ(x, 4);
 }
 
-TEST(ScopedHelpers, ScopedLengthRestorer)
-{
-    // Test with local path.
-    {
-        auto x = LocalPath::fromAbsolutePath("x");
-        auto originalSize = SizeTraits<LocalPath>::size(x);
-
-        {
-            auto r = makeScopedSizeRestorer(x);
-            x.appendWithSeparator(LocalPath::fromRelativePath("y"), true);
-            EXPECT_NE(SizeTraits<LocalPath>::size(x), originalSize);
-        }
-
-        EXPECT_EQ(SizeTraits<LocalPath>::size(x), originalSize);
-    }
-
-    // Test with vector.
-    {
-        std::vector<std::string> x(1, "foo");
-
-        auto originalSize = x.size();
-
-        {
-            auto r = makeScopedSizeRestorer(x);
-            x.emplace_back("bar");
-        }
-
-        EXPECT_EQ(x.size(), originalSize);
-    }
-
-    // Test with explicit new size given.
-    {
-        std::string x;
-
-        {
-            auto r = makeScopedSizeRestorer(x, 32);
-            EXPECT_EQ(x.size(), 32);
-        }
-
-        EXPECT_TRUE(x.empty());
-    }
-}
-
 TEST(ScopedHelpers, ScopedValue)
 {
     const std::string originalValue = "before";
@@ -1601,4 +1565,277 @@ TEST(LikeCompare, CombinedMatch)
     ASSERT_TRUE(likeCompare("你ç?*", "你c好!"));
 
     ASSERT_FALSE(likeCompare("HÉ?l*e\\*", "heLloé"));
+}
+
+TEST(NaturalSorting, Numbers)
+{
+    static const std::vector<std::string> input =
+        {"123", "0123", "00123", "234", "0234", "00234", "00", "0", "000"}; // input
+
+    static const std::vector<std::string> expected =
+        {"0", "00", "000", "00123", "0123", "123", "00234", "0234", "234"}; // expected
+
+    std::vector<std::string> computed = input;
+
+    std::sort(computed.begin(), computed.end(), NaturalSortingComparator());
+
+    EXPECT_EQ(computed, expected);
+}
+
+class CreateIdFromName: public testing::TestWithParam<uint64_t>
+{
+public:
+    static constexpr uint64_t compileTimeSeed()
+    {
+        uint64_t s = 0;
+        for (const auto c: __TIME__)
+        {
+            s <<= 8;
+            s |= static_cast<uint64_t>(c);
+        }
+        return s;
+    }
+};
+
+TEST_P(CreateIdFromName, ValidateNewImplementation)
+{
+    static constexpr uint64_t seed = CreateIdFromName::compileTimeSeed();
+    static constexpr string_view validChars{"!#$%&*+0123456789?^_abcdefghijklmnopqrstuvwxyz~"};
+    static constexpr char n[8]{validChars[seed % validChars.size()],
+                               validChars[seed * 2 % validChars.size()],
+                               validChars[seed * 3 % validChars.size()],
+                               validChars[seed * 4 % validChars.size()],
+                               validChars[seed * 5 % validChars.size()],
+                               validChars[seed * 6 % validChars.size()],
+                               validChars[seed * 7 % validChars.size()],
+                               validChars[seed * 8 % validChars.size()]};
+
+    const uint64_t nameSize = GetParam();
+    switch (nameSize)
+    {
+        case 1:
+        {
+            static constexpr char name[]{n[0], 0};
+            static_assert(makeNameid(name) == MAKENAMEID1(n[0]));
+            ASSERT_EQ(makeNameid(string{name}), MAKENAMEID1(n[0]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr), MAKENAMEID1(n[0]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 2:
+        {
+            static constexpr char name[]{n[0], n[1], 0};
+            static_assert(makeNameid(name) == MAKENAMEID2(n[0], n[1]));
+            ASSERT_EQ(makeNameid(string{name}), MAKENAMEID2(n[0], n[1]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr), MAKENAMEID2(n[0], n[1]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 3:
+        {
+            static constexpr char name[]{n[0], n[1], n[2], 0};
+            static_assert(makeNameid(name) == MAKENAMEID3(n[0], n[1], n[2]));
+            ASSERT_EQ(makeNameid(string{name}), MAKENAMEID3(n[0], n[1], n[2]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr), MAKENAMEID3(n[0], n[1], n[2]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 4:
+        {
+            static constexpr char name[]{n[0], n[1], n[2], n[3], 0};
+            static_assert(makeNameid(name) == MAKENAMEID4(n[0], n[1], n[2], n[3]));
+            ASSERT_EQ(makeNameid(string{name}), MAKENAMEID4(n[0], n[1], n[2], n[3]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr), MAKENAMEID4(n[0], n[1], n[2], n[3]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 5:
+        {
+            static constexpr char name[]{n[0], n[1], n[2], n[3], n[4], 0};
+            static_assert(makeNameid(name) == MAKENAMEID5(n[0], n[1], n[2], n[3], n[4]));
+            ASSERT_EQ(makeNameid(string{name}), MAKENAMEID5(n[0], n[1], n[2], n[3], n[4]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr), MAKENAMEID5(n[0], n[1], n[2], n[3], n[4]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 6:
+        {
+            static constexpr char name[]{n[0], n[1], n[2], n[3], n[4], n[5], 0};
+            static_assert(makeNameid(name) == MAKENAMEID6(n[0], n[1], n[2], n[3], n[4], n[5]));
+            ASSERT_EQ(makeNameid(string{name}), MAKENAMEID6(n[0], n[1], n[2], n[3], n[4], n[5]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr), MAKENAMEID6(n[0], n[1], n[2], n[3], n[4], n[5]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 7:
+        {
+            static constexpr char name[]{n[0], n[1], n[2], n[3], n[4], n[5], n[6], 0};
+            static_assert(makeNameid(name) ==
+                          MAKENAMEID7(n[0], n[1], n[2], n[3], n[4], n[5], n[6]));
+            ASSERT_EQ(makeNameid(string{name}),
+                      MAKENAMEID7(n[0], n[1], n[2], n[3], n[4], n[5], n[6]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr),
+                      MAKENAMEID7(n[0], n[1], n[2], n[3], n[4], n[5], n[6]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+        case 8:
+        {
+            static constexpr char name[]{n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7], 0};
+            static_assert(makeNameid(name) ==
+                          MAKENAMEID8(n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]));
+            ASSERT_EQ(makeNameid(string{name}),
+                      MAKENAMEID8(n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]))
+                << "Failed for \"" << name << '"';
+            static const char* constCharPtr = name;
+            ASSERT_EQ(makeNameid(constCharPtr),
+                      MAKENAMEID8(n[0], n[1], n[2], n[3], n[4], n[5], n[6], n[7]))
+                << "Failed for \"" << name << '"';
+            break;
+        }
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(NameidTests, CreateIdFromName, testing::Values(1, 2, 3, 4, 5, 6, 7, 8));
+
+// Test class Range
+TEST(RangeTest, ValidRange)
+{
+    // Range from 2 to 5 -> expect iteration over 2, 3, 4
+    Range r(2, 5);
+    std::vector<unsigned> values(std::begin(r), std::end(r));
+    EXPECT_THAT(values, testing::ElementsAre(2, 3, 4));
+}
+
+TEST(RangeTest, EmptyRangeWhenStartEqualsToEnd)
+{
+    // Range from 5 to 5 -> empty range
+    Range r(5, 5);
+
+    EXPECT_TRUE(r.empty());
+}
+
+TEST(RangeTest, EmptyRangeWhenStartGreaterThanEnd)
+{
+    // Range from 6 to 5 -> empty range
+    Range r(6, 5);
+    EXPECT_TRUE(r.empty());
+
+    unsigned count = 0;
+    for ([[maybe_unused]] const auto val: r)
+    {
+        ++count;
+    }
+
+    EXPECT_EQ(count, 0);
+}
+
+TEST(RangeTest, OverloadRangeToZeroStart)
+{
+    // range(5) -> Range(0, 5)
+    auto r = range(5);
+
+    std::vector<unsigned> values;
+    for (const auto val: r)
+    {
+        values.push_back(val);
+    }
+
+    EXPECT_THAT(values, testing::ElementsAre(0, 1, 2, 3, 4));
+}
+
+TEST(RangeTest, VerifySingleElementRange)
+{
+    // Range(7, 8) should iterate exactly once
+    auto r = range(7, 8);
+
+    unsigned count = 0;
+    unsigned valueCollected = 0;
+    for (const auto val: r)
+    {
+        ++count;
+        valueCollected = val;
+    }
+
+    EXPECT_EQ(count, 1);
+    EXPECT_EQ(valueCollected, 7u);
+}
+
+struct FileAccessTest: ::testing::Test
+{
+    FileAccessTest():
+        Test(),
+        mFSAccess(),
+        mName(LocalPath::fromAbsolutePath("file"))
+    {}
+
+    // Called before any test in the fixture is executed.
+    void SetUp() override
+    {
+        // Remove the file if it's present after a previous test run.
+        ASSERT_TRUE(mFSAccess.unlinklocal(mName) || !mFSAccess.target_exists);
+    }
+
+    // Convenience.
+    ::mega::FSLogging NO_LOGGING = ::mega::FSLogging::noLogging;
+
+    // So we can get our hands on a FileAccess instance.
+    FSACCESS_CLASS mFSAccess;
+
+    // The name of our test file.
+    ::mega::LocalPath mName;
+}; // FileAccessTest
+
+TEST_F(FileAccessTest, OpenForReadWriteSucceeds)
+{
+    // So we can open a file.
+    auto fileAccess = mFSAccess.newfileaccess(false);
+
+    // Sanity.
+    ASSERT_TRUE(fileAccess);
+
+    // Opening for reading and writing should create a new file if necessary.
+    EXPECT_TRUE(fileAccess->fopen(mName, true, true, NO_LOGGING));
+}
+
+TEST_F(FileAccessTest, OpenEquivalence)
+{
+    auto fileAccess0 = mFSAccess.newfileaccess(false);
+    auto fileAccess1 = mFSAccess.newfileaccess(false);
+
+    // Sanity.
+    ASSERT_TRUE(fileAccess0);
+    ASSERT_TRUE(fileAccess1);
+
+    // Create a new file.
+    ASSERT_TRUE(fileAccess0->fopen(mName, true, true, NO_LOGGING));
+
+    // Open an existing file.
+    EXPECT_TRUE(fileAccess1->fopen(mName, true, true, NO_LOGGING));
+
+    // Convenience.
+    auto& lhs = *fileAccess0;
+    auto& rhs = *fileAccess1;
+
+    // Make sure selected state is equivalent.
+    EXPECT_EQ(lhs.fopenSucceeded, rhs.fopenSucceeded);
+    EXPECT_EQ(lhs.size, rhs.size);
+    EXPECT_EQ(lhs.mtime, rhs.mtime);
+    EXPECT_EQ(lhs.fsid, rhs.fsid);
+    EXPECT_EQ(lhs.type, rhs.type);
+    EXPECT_EQ(lhs.mIsSymLink, rhs.mIsSymLink);
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <mega/fuse/common/activity_monitor.h>
+#include <mega/common/activity_monitor.h>
 #include <mega/fuse/common/mount_result_forward.h>
 #include <mega/fuse/common/service_callbacks.h>
 #include <mega/fuse/platform/mount_forward.h>
@@ -19,13 +19,14 @@ class Unmounter final
 {
     // Report the result of an unmount operation.
     void emitEvent(MountDisabledCallback callback,
-                   LocalPath path,
+                   const std::string& name,
                    MountResult result);
 
     // Try and unmount the specified mount.
     void unmount(MountDisabledCallback callback,
                  MountWeakPtr mount,
-                 LocalPath path);
+                 const std::string& name,
+                 const LocalPath& path);
 
     // Unmount the specified mount.
     MountResult unmount(Mount& mount,
@@ -33,7 +34,7 @@ class Unmounter final
                         bool abort);
 
     // Tracks whether we have any unmounts in progress.
-    ActivityMonitor mActivities;
+    common::ActivityMonitor mActivities;
 
     // Which context contains our mounts?
     platform::ServiceContext& mContext;

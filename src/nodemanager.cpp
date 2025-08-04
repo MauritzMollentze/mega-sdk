@@ -20,13 +20,15 @@
  */
 
 #include "mega/nodemanager.h"
-#include "mega/megaclient.h"
+
 #include "mega/base64.h"
 #include "mega/megaapp.h"
+#include "mega/megaclient.h"
 #include "mega/share.h"
 
-
 namespace mega {
+
+NodeManager::NoKeyLogger NodeManager::mNoKeyLogger{};
 
 bool NodeSearchFilter::isValidNodeType(const nodetype_t nodeType) const
 {
@@ -85,7 +87,7 @@ bool NodeSearchFilter::isValidTagSequence(const uint8_t* tagSequence) const
     if (!tagSequence || mTagFilterContainsSeparator)
         return false;
     auto tokens = splitString(reinterpret_cast<const char*>(tagSequence), TAG_DELIMITER);
-    return getTagPosition(tokens, mTagFilter) != tokens.end();
+    return getTagPosition(tokens, mTagFilter.getPattern()) != tokens.end();
 }
 
 bool NodeSearchFilter::isValidFav(const bool isNodeFav) const
@@ -118,6 +120,17 @@ bool NodeSearchFilter::isDocType(const MimeType_t t)
     }
 }
 
+// Log the first 256 entries and then every 256 entries
+void NodeManager::NoKeyLogger::log(const Node& n) const
+{
+    auto current = mCount.fetch_add(1);
+    if (current <= 256 || (current % 256 == 0))
+    {
+        LOG_debug << "Storing an encrypted node[" << current << "]: " << n.type << " " << n.size
+                  << " " << Base64Str<MegaClient::NODEHANDLE>(n.nodehandle);
+    }
+}
+
 NodeManager::NodeManager(MegaClient& client)
     : mClient(client)
     , mNodesInRam{0}
@@ -147,6 +160,7 @@ void NodeManager::reset_internal()
     assert(mMutex.owns_lock());
     setTable_internal(nullptr);
     cleanNodes_internal();
+    mNullRootNodesReported = false;
 }
 
 bool NodeManager::setrootnode(std::shared_ptr<Node> node)
@@ -229,8 +243,11 @@ void NodeManager::notifyNode_internal(std::shared_ptr<Node> n, sharedNode_vector
 
             int attrlen = int(n->attrstring->size());
             string base64attrstring;
-            base64attrstring.resize(attrlen * 4 / 3 + 4);
-            base64attrstring.resize(Base64::btoa((byte *)n->attrstring->data(), int(n->attrstring->size()), (char *)base64attrstring.data()));
+            base64attrstring.resize(static_cast<size_t>(attrlen * 4 / 3 + 4));
+            base64attrstring.resize(
+                static_cast<size_t>(Base64::btoa((byte*)n->attrstring->data(),
+                                                 int(n->attrstring->size()),
+                                                 (char*)base64attrstring.data())));
 
             char report[512];
             Base64::btoa((const byte *)&n->nodehandle, MegaClient::NODEHANDLE, report);
@@ -332,6 +349,24 @@ bool NodeManager::updateNode_internal(Node *node)
     return true;
 }
 
+void NodeManager::reportNullRootNodes(const size_t rootNodesSize)
+{
+    if (mNullRootNodesReported)
+    {
+        return;
+    }
+
+    rootNodesSize >= rootnodes.MIN_NUM_ROOT_NODES ?
+        mClient.sendevent(99490, "Null rootnode/s detected", 0) :
+        mClient.sendevent(99491,
+                          "Null rootnode/s detected and wrong number of root nodes retrieved",
+                          0);
+    LOG_err << "getNodeCount_internal: Null rootnode/s detected. Number of root nodes: "
+            << rootNodesSize;
+    mNullRootNodesReported = true;
+    assert(false);
+}
+
 std::shared_ptr<Node> NodeManager::getNodeByHandle(NodeHandle handle)
 {
     LockGuard g(mMutex);
@@ -357,13 +392,17 @@ std::shared_ptr<Node> NodeManager::getNodeByHandle_internal(NodeHandle handle)
     return node;
 }
 
-sharedNode_list NodeManager::getChildren(const Node *parent, CancelToken cancelToken)
+sharedNode_list NodeManager::getChildren(const Node* parent,
+                                         CancelToken cancelToken,
+                                         bool includeVersions)
 {
     LockGuard g(mMutex);
-    return getChildren_internal(parent, cancelToken);
+    return getChildren_internal(parent, cancelToken, includeVersions);
 }
 
-sharedNode_list NodeManager::getChildren_internal(const Node *parent, CancelToken cancelToken)
+sharedNode_list NodeManager::getChildren_internal(const Node* parent,
+                                                  CancelToken cancelToken,
+                                                  bool includeVersions)
 {
     assert(mMutex.owns_lock());
 
@@ -422,6 +461,7 @@ sharedNode_list NodeManager::getChildren_internal(const Node *parent, CancelToke
 
         std::vector<std::pair<NodeHandle, NodeSerialized>> nodesFromTable;
         NodeSearchFilter nf;
+        nf.includeVersions(includeVersions);
         nf.byAncestors({parent->nodehandle, UNDEF, UNDEF});
         mTable->getChildren(nf,
                             0 /*Order none*/,
@@ -596,10 +636,17 @@ uint64_t NodeManager::getNodeCount_internal()
     uint64_t count = 0;
     sharedNode_vector roots = getRootNodesAndInshares();
 
-    for (auto& node : roots)
+    for (auto& node: roots)
     {
-        NodeCounter nc = node->getCounter();
-        count += nc.files + nc.folders + nc.versions;
+        if (node)
+        {
+            NodeCounter nc = node->getCounter();
+            count += nc.files + nc.folders + nc.versions;
+        }
+        else
+        {
+            reportNullRootNodes(roots.size());
+        }
     }
 
     // add roots to the count if logged into account (and fetchnodes is done <- roots are ready)
@@ -639,37 +686,50 @@ uint64_t NodeManager::getNodeCount_internal()
     return count;
 }
 
-std::set<std::string> NodeManager::getAllNodeTags(const char* searchString, CancelToken cancelFlag)
+auto NodeManager::getNodeTagsBelow(CancelToken cancelToken,
+                                   const std::set<NodeHandle>& handles,
+                                   const std::string& pattern)
+    -> std::optional<std::set<std::string>>
 {
-    LockGuard g(mMutex);
-    return getAllNodeTags_internal(searchString, cancelFlag);
-}
+    // Make sure we have exclusive access to the database.
+    LockGuard guard(mMutex);
 
-std::set<std::string> NodeManager::getAllNodeTags_internal(const char* searchString,
-                                                           CancelToken cancelFlag)
-{
-    assert(mMutex.owns_lock());
-    // validation
+    // Convenience.
+    static const auto warning = [](const char* message)
+    {
+        LOG_warn << "getNodeTagsBelow: " << message;
+        return std::nullopt;
+    }; // warning
+
+    // Make sure the database is sane and that some nodes exist.
     if (!mTable || mNodes.empty())
-    {
-        LOG_warn
-            << "getAllNodeTags_internal: The database is not opened or there are no nodes loaded";
-        assert(mTable && !mNodes.empty());
-        return {};
-    }
-    const std::string auxSearchString = searchString ? searchString : "";
-    // ',' cannot be in the string
-    if (auxSearchString.find(MegaClient::TAG_DELIMITER) != std::string::npos)
-    {
-        LOG_warn << "getAllNodeTags_internal: The search string (" << auxSearchString
-                 << ") contains an invalid character (,)";
-        return {};
-    }
-    std::set<std::string> result;
-    if (!mTable->getAllNodeTags(auxSearchString, result, cancelFlag))
-        return {};
+        return warning("The database hasn't been opened or there are no nodes present");
 
-    return result;
+    // Make sure the caller isn't trying to filter by multiple tags simultaneously.
+    if (pattern.find(MegaClient::TAG_DELIMITER) != std::string::npos)
+        return warning("You can't filter by multiple tags at the same time");
+
+    std::optional<std::set<std::string>> accumulatedTags;
+
+    // Try and retrieve the tags below the specified nodes.
+    for (const auto& handle: handles)
+    {
+        // Try and retrieve tags below this node.
+        auto tags = mTable->getNodeTagsBelow(cancelToken, handle, pattern);
+
+        // Couldn't get tags.
+        if (!tags)
+            continue;
+
+        // Merge tags into accumulated result if possible.
+        if (accumulatedTags)
+            accumulatedTags->merge(*tags);
+        else
+            accumulatedTags = std::move(tags);
+    }
+
+    // Return accumulated tags to caller.
+    return accumulatedTags;
 }
 
 sharedNode_vector NodeManager::searchNodes(const NodeSearchFilter& filter, int order, CancelToken cancelFlag, const NodeSearchPage& page)
@@ -740,13 +800,13 @@ sharedNode_vector NodeManager::getNodesWithLinks()
     return getNodesWithSharesOrLink_internal(ShareType_t::LINK);
 }
 
-sharedNode_vector NodeManager::getNodesByFingerprint(FileFingerprint &fingerprint)
+sharedNode_vector NodeManager::getNodesByFingerprint(const FileFingerprint& fingerprint)
 {
     LockGuard g(mMutex);
     return getNodesByFingerprint_internal(fingerprint);
 }
 
-sharedNode_vector NodeManager::getNodesByFingerprint_internal(FileFingerprint &fingerprint)
+sharedNode_vector NodeManager::getNodesByFingerprint_internal(const FileFingerprint& fingerprint)
 {
     assert(mMutex.owns_lock());
 
@@ -762,7 +822,7 @@ sharedNode_vector NodeManager::getNodesByFingerprint_internal(FileFingerprint &f
     auto p = mFingerPrints.equal_range(&fingerprint);
     for (auto it = p.first; it != p.second; ++it)
     {
-        Node* node = static_cast<Node*>(*it);
+        const auto node = static_cast<const Node*>(*it);
         fpLoaded.emplace(node->nodeHandle());
         std::shared_ptr<Node> sharedNode = node->mNodePosition->second.getNodeInRam();
         assert(sharedNode && "Node loaded at fingerprint map should have a node in RAM ");
@@ -857,7 +917,7 @@ std::shared_ptr<Node> NodeManager::getNodeByFingerprint_internal(FileFingerprint
     auto it = mFingerPrints.find(&fingerprint);
     if (it != mFingerPrints.end())
     {
-        Node *n = static_cast<Node*>(*it);
+        const auto n = static_cast<const Node*>(*it);
         assert(n);
         return n->mNodePosition->second.getNodeInRam();
     }
@@ -1232,7 +1292,7 @@ size_t NodeManager::getNumberOfChildrenFromNode_internal(NodeHandle parentHandle
         return parentIt->second.mChildren ? parentIt->second.mChildren->size() : 0;
     }
 
-    return mTable->getNumberOfChildren(parentHandle);
+    return static_cast<size_t>(mTable->getNumberOfChildren(parentHandle));
 }
 
 size_t NodeManager::getNumberOfChildrenByType(NodeHandle parentHandle, nodetype_t nodeType)
@@ -1253,7 +1313,7 @@ size_t NodeManager::getNumberOfChildrenByType_internal(NodeHandle parentHandle, 
 
     assert(nodeType == FILENODE || nodeType == FOLDERNODE);
 
-    return mTable->getNumberOfChildrenByType(parentHandle, nodeType);
+    return static_cast<size_t>(mTable->getNumberOfChildrenByType(parentHandle, nodeType));
 }
 
 bool NodeManager::isAncestor(NodeHandle nodehandle, NodeHandle ancestor, CancelToken cancelFlag)
@@ -1425,13 +1485,6 @@ void NodeManager::notifyPurge()
         {
             std::shared_ptr<Node> n = nodesToReport[i];
 
-            if (n->attrstring)
-            {
-                // make this just a warning to avoid auto test failure
-                // this can happen if another client adds a folder in our share and the key for us is not available yet
-                LOG_warn << "NO_KEY node: " << n->type << " " << n->size << " " << toNodeHandle(n->nodehandle) << " " << n->nodekeyUnchecked().size();
-            }
-
             if (n->changed.removed)
             {
                 // remove inbound share
@@ -1531,12 +1584,12 @@ bool NodeManager::loadNodes_internal()
         return false;
     }
 
-    sharedNode_vector rootnodes = getRootNodes_internal();
+    sharedNode_vector allRootNodes = getRootNodes_internal();
     // We can't base in `user.sharing` because it's set yet. We have to get from DB
     sharedNode_vector inshares =
         getNodesWithSharesOrLink_internal(ShareType_t::IN_SHARES); // it includes nested inshares
 
-    for (auto &node : rootnodes)
+    for (const auto& node: allRootNodes)
     {
         getChildren_internal(node.get());
     }
@@ -1760,9 +1813,16 @@ void NodeManager::initCompleted_internal()
     }
 
     sharedNode_vector rootNodes = getRootNodesAndInshares();
-    for (auto& node : rootNodes)
+    for (auto& node: rootNodes)
     {
-        calculateNodeCounter(node->nodeHandle(), TYPE_UNKNOWN, node, node->type == RUBBISHNODE);
+        if (node)
+        {
+            calculateNodeCounter(node->nodeHandle(), TYPE_UNKNOWN, node, node->type == RUBBISHNODE);
+        }
+        else
+        {
+            reportNullRootNodes(rootNodes.size());
+        }
     }
 
     mTable->createIndexes();
@@ -1829,9 +1889,16 @@ NodeCounter NodeManager::getCounterOfRootNodes_internal()
     }
 
     sharedNode_vector rootNodes = getRootNodes_internal();
-    for (auto& node : rootNodes)
+    for (auto& node: rootNodes)
     {
-        c += node->getCounter();
+        if (node)
+        {
+            c += node->getCounter();
+        }
+        else
+        {
+            reportNullRootNodes(rootNodes.size());
+        }
     }
 
     return c;
@@ -2060,16 +2127,16 @@ shared_ptr<Node> NodeManager::getNodeFromDataBase(NodeHandle handle)
 sharedNode_vector NodeManager::getRootNodesAndInshares()
 {
     assert(mMutex.owns_lock());
-    sharedNode_vector rootnodes;
+    sharedNode_vector allRootNodes;
 
-    rootnodes = getRootNodes_internal();
+    allRootNodes = getRootNodes_internal();
     if (!mClient.loggedIntoFolder()) // logged into user's account: incoming shared folders
     {
         sharedNode_vector inshares = mClient.getInShares();
-        rootnodes.insert(rootnodes.end(), inshares.begin(), inshares.end());
+        allRootNodes.insert(allRootNodes.end(), inshares.begin(), inshares.end());
     }
 
-    return rootnodes;
+    return allRootNodes;
 }
 
 sharedNode_vector NodeManager::processUnserializedNodes(const vector<pair<NodeHandle, NodeSerialized>>& nodesFromTable, CancelToken cancelFlag)
@@ -2147,13 +2214,12 @@ void NodeManager::putNodeInDb(Node* node) const
     if (node->attrstring)
     {
         // Last attempt to decrypt the node before storing it.
-        LOG_debug << "Trying to store an encrypted node";
         node->applykey();
         node->setattr();
 
         if (node->attrstring)
         {
-            LOG_debug << "Storing an encrypted node.";
+            mNoKeyLogger.log(*node);
         }
     }
 

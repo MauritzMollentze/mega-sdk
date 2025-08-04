@@ -34,10 +34,6 @@
 #include "mega/osx/osxutils.h"
 #endif
 
-#if TARGET_OS_IPHONE
-#include <resolv.h>
-#endif
-
 namespace mega {
 
 // data receive timeout (ds)
@@ -185,7 +181,7 @@ Proxy *HttpIO::getautoproxy()
                 }
             }
 
-            proxy->setProxyURL(&proxyURL);
+            proxy->setProxyURL(proxyURL);
         }
         else if (ieProxyConfig.lpszAutoConfigUrl || ieProxyConfig.fAutoDetect == TRUE)
         {
@@ -223,7 +219,7 @@ Proxy *HttpIO::getautoproxy()
                     string proxyURL;
                     proxy->setProxyType(Proxy::CUSTOM);
                     proxyURL.assign((const char*)proxyInfo.lpszProxy, wcslen(proxyInfo.lpszProxy) * sizeof(wchar_t));
-                    proxy->setProxyURL(&proxyURL);
+                    proxy->setProxyURL(proxyURL);
                 }
             }
             WinHttpCloseHandle(hSession);
@@ -244,128 +240,13 @@ Proxy *HttpIO::getautoproxy()
     {
         GlobalFree(ieProxyConfig.lpszAutoConfigUrl);
     }
-#endif
-
-#if defined(__APPLE__) && !(TARGET_OS_IPHONE)
+#elif defined(__APPLE__) && !(TARGET_OS_IPHONE)
     getOSXproxy(proxy);
+#elif !defined(__APPLE__) && !defined(__ANDROID__)
+    getEnvProxy(proxy);
 #endif
 
     return proxy;
-}
-
-void HttpIO::getMEGADNSservers(string *dnsservers, bool getfromnetwork)
-{
-    if (!dnsservers)
-    {
-        return;
-    }
-
-    dnsservers->clear();
-    if (getfromnetwork)
-    {
-        struct addrinfo *aiList = NULL;
-        struct addrinfo *hp;
-
-        struct addrinfo hints = {};
-        hints.ai_family = AF_UNSPEC;
-
-#ifndef __MINGW32__
-        hints.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG;
-#endif
-
-        if (!getaddrinfo("ns.mega.co.nz", NULL, &hints, &aiList))
-        {
-            hp = aiList;
-            while (hp)
-            {
-                char straddr[INET6_ADDRSTRLEN];
-                straddr[0] = 0;
-
-                if (hp->ai_family == AF_INET)
-                {
-                    sockaddr_in *addr = (sockaddr_in *)hp->ai_addr;
-                    mega_inet_ntop(hp->ai_family, &addr->sin_addr, straddr, sizeof(straddr));
-                }
-                else if(hp->ai_family == AF_INET6)
-                {
-                    sockaddr_in6 *addr = (sockaddr_in6 *)hp->ai_addr;
-                    mega_inet_ntop(hp->ai_family, &addr->sin6_addr, straddr, sizeof(straddr));
-                }
-
-                if (straddr[0])
-                {
-                    if(dnsservers->size())
-                    {
-                        dnsservers->append(",");
-                    }
-                    dnsservers->append(straddr);
-                }
-
-                hp = hp->ai_next;
-            }
-            freeaddrinfo(aiList);
-        }
-    }
-
-    if (!getfromnetwork || !dnsservers->size())
-    {
-        *dnsservers = MEGA_DNS_SERVERS;
-        LOG_info << "Using hardcoded MEGA DNS servers: " << *dnsservers;
-    }
-    else
-    {
-        LOG_info << "Using current MEGA DNS servers: " << *dnsservers;
-    }
-}
-
-// this method allows to retrieve DNS servers as configured in the system. Note that, under Wifi connections,
-// it usually returns the gateway (192.168.1.1 or similar), so the DNS requests done by c-ares represent a
-// an access to the local network, which we aim to avoid since iOS 14 requires explicit permission given by the user.
-void HttpIO::getDNSserversFromIos(string& dnsServers)
-{
-#if TARGET_OS_IPHONE
-    // Workaround to get the IP of valid DNS servers on iOS
-     __res_state res;
-     bool valid;
-     if (res_ninit(&res) == 0)
-     {
-         union res_sockaddr_union u[MAXNS];
-         int nscount = res_getservers(&res, u, MAXNS);
-
-         for (int i = 0; i < nscount; i++)
-         {
-             char straddr[INET6_ADDRSTRLEN];
-             straddr[0] = 0;
-             valid = false;
-
-             if (u[i].sin.sin_family == PF_INET)
-             {
-                 valid = mega_inet_ntop(PF_INET, &u[i].sin.sin_addr, straddr, sizeof(straddr)) == straddr;
-             }
-
-             if (u[i].sin6.sin6_family == PF_INET6)
-             {
-                 valid = mega_inet_ntop(PF_INET6, &u[i].sin6.sin6_addr, straddr, sizeof(straddr)) == straddr;
-             }
-
-             if (valid && straddr[0])
-             {
-                 if (dnsServers.size())
-                 {
-                     dnsServers.append(",");
-                 }
-                 dnsServers.append(straddr);
-             }
-         }
-
-         res_ndestroy(&res);
-     }
-
-     if (!dnsServers.size())
-     {
-         LOG_warn << "Failed to get DNS servers from OS";
-     }
-#endif
 }
 
 bool HttpIO::setmaxdownloadspeed(m_off_t)
@@ -388,68 +269,48 @@ m_off_t HttpIO::getmaxuploadspeed()
     return 0;
 }
 
-void HttpReq::post(MegaClient* client, const char* data, unsigned len)
+void HttpIO::setproxy(const Proxy&) {}
+
+std::optional<Proxy> HttpIO::getproxy() const
+{
+    return std::nullopt;
+}
+
+void HttpReq::prepareMethod(HttpIO* clientHttpIo, const httpmethod_t reqMethod)
 {
     if (httpio)
     {
-        LOG_warn << "Ensuring that the request is finished before sending it again";
+        LOG_warn << logname << "Ensuring that the request is finished before sending it again";
         httpio->cancel(this);
         init();
     }
 
-    httpio = client->httpio;
+    httpio = clientHttpIo;
     bufpos = 0;
     outpos = 0;
     notifiedbufpos = 0;
     inpurge = 0;
-    method = METHOD_POST;
+    method = reqMethod;
     contentlength = -1;
     lastdata = Waiter::ds;
+}
 
+void HttpReq::post(MegaClient* client, const char* data, unsigned len)
+{
+    prepareMethod(client->httpio, METHOD_POST);
     DEBUG_TEST_HOOK_HTTPREQ_POST(this)
-
     httpio->post(this, data, len);
 }
 
 void HttpReq::get(MegaClient *client)
 {
-    if (httpio)
-    {
-        LOG_warn << "Ensuring that the request is finished before sending it again";
-        httpio->cancel(this);
-        init();
-    }
-
-    httpio = client->httpio;
-    bufpos = 0;
-    outpos = 0;
-    notifiedbufpos = 0;
-    inpurge = 0;
-    method = METHOD_GET;
-    contentlength = -1;
-    lastdata = Waiter::ds;
-
+    prepareMethod(client->httpio, METHOD_GET);
     httpio->post(this);
 }
 
 void HttpReq::dns(MegaClient *client)
 {
-    if (httpio)
-    {
-        LOG_warn << "Ensuring that the request is finished before sending it again";
-        httpio->cancel(this);
-        init();
-    }
-
-    httpio = client->httpio;
-    bufpos = 0;
-    outpos = 0;
-    notifiedbufpos = 0;
-    inpurge = 0;
-    method = METHOD_NONE;
-    contentlength = -1;
-    lastdata = Waiter::ds;
-
+    prepareMethod(client->httpio, METHOD_NONE);
     httpio->post(this);
 }
 
@@ -463,9 +324,13 @@ void HttpReq::disconnect()
     }
 }
 
-HttpReq::HttpReq(bool b)
+std::atomic_uint32_t HttpReq::nextReqId{0u};
+
+HttpReq::HttpReq(bool b):
+    reqId{nextReqId++},
+    logname{"(Req#" + std::to_string(reqId) + ") "}
 {
-    LOG_verbose << "[HttpReq::HttpReq] CONSTRUCTOR CALL [this = " << this << "]";
+    LOG_verbose << logname << "[HttpReq::HttpReq] CONSTRUCTOR CALL [this = " << this << "]";
     binary = b;
     status = REQ_READY;
     buf = NULL;
@@ -485,7 +350,7 @@ HttpReq::HttpReq(bool b)
 
 HttpReq::~HttpReq()
 {
-    LOG_verbose << "[HttpReq::~HttpReq] DESTRUCTOR CALL [this = " << this << "]";
+    LOG_verbose << logname << "[HttpReq::~HttpReq] DESTRUCTOR CALL [this = " << this << "]";
     if (httpio)
     {
         httpio->cancel(this);
@@ -647,39 +512,6 @@ void HttpReq::setcontentlength(m_off_t len)
     contentlength = len;
 }
 
-// make space for receiving data; adjust len if out of space
-byte* HttpReq::reserveput(unsigned* len)
-{
-    if (buf)
-    {
-        if (bufpos + *len > buflen)
-        {
-            *len = static_cast<unsigned>(buflen - bufpos);
-        }
-
-        return buf + bufpos;
-    }
-    else
-    {
-        if (inpurge)
-        {
-            // FIXME: optimize erase()/resize() -> single copy/resize()
-            in.erase(0, inpurge);
-            bufpos -= inpurge;
-            inpurge = 0;
-        }
-
-        if (bufpos + *len > (int) in.size())
-        {
-            in.resize(static_cast<size_t>(bufpos + *len));
-        }
-
-        *len = static_cast<unsigned>(in.size() - bufpos);
-
-        return (byte*)in.data() + bufpos;
-    }
-}
-
 // number of bytes transferred in this request
 m_off_t HttpReq::transferred(MegaClient*)
 {
@@ -689,7 +521,7 @@ m_off_t HttpReq::transferred(MegaClient*)
     }
     else
     {
-        return in.size();
+        return static_cast<m_off_t>(in.size());
     }
 }
 
@@ -700,14 +532,21 @@ HttpReqDL::HttpReqDL()
 }
 
 // prepare file chunk download
-void HttpReqDL::prepare(const char* tempurl, SymmCipher* /*key*/,
-                        uint64_t /*ctriv*/, m_off_t pos,
+void HttpReqDL::prepare(const char* tempurl,
+                        SymmCipher* /*key*/,
+                        uint64_t /*ctriv*/,
+                        m_off_t downloadPosition,
                         m_off_t npos)
 {
     if (tempurl && *tempurl)
     {
         char urlbuf[512];
-        snprintf(urlbuf, sizeof urlbuf, "%s/%" PRIu64 "-%" PRIu64, tempurl, pos, npos ? npos - 1 : 0);
+        snprintf(urlbuf,
+                 sizeof urlbuf,
+                 "%s/%" PRIu64 "-%" PRIu64,
+                 tempurl,
+                 downloadPosition,
+                 npos ? npos - 1 : 0);
         setreq(urlbuf, REQ_BINARY);
     }
     else
@@ -715,8 +554,8 @@ void HttpReqDL::prepare(const char* tempurl, SymmCipher* /*key*/,
         setreq(nullptr, REQ_BINARY);
     }
 
-    dlpos = pos;
-    size = (unsigned)(npos - pos);
+    dlpos = downloadPosition;
+    size = (unsigned)(npos - downloadPosition);
     buffer_released = false;
 
     if (!buf || buflen != size)
@@ -730,7 +569,8 @@ void HttpReqDL::prepare(const char* tempurl, SymmCipher* /*key*/,
 
         if (size)
         {
-            buf = new byte[(size + SymmCipher::BLOCKSIZE - 1) & - SymmCipher::BLOCKSIZE];
+            buf = new byte[(size + SymmCipher::BLOCKSIZE - 1) &
+                           ~(static_cast<size_t>(SymmCipher::BLOCKSIZE) - 1)];
         }
         buflen = size;
     }
@@ -779,7 +619,7 @@ void EncryptByChunks::updateCRC(byte* data, unsigned size, unsigned offset)
     }
     if (ll)
     {
-        data += (size - ll);
+        data += (size - static_cast<size_t>(ll));
         while (ll--)
         {
             crc[ll] ^= data[ll];
@@ -801,7 +641,13 @@ bool EncryptByChunks::encrypt(m_off_t pos, m_off_t npos, string& urlSuffix)
 
         // The chunk is fully encrypted but finished==false for now,
         // we only set finished after confirmation of the chunk uploading.
-        macs->ctr_encrypt(startpos, key, buf, unsigned(chunksize), startpos, ctriv, false);
+        macs->ctr_encrypt(startpos,
+                          key,
+                          buf,
+                          unsigned(chunksize),
+                          startpos,
+                          static_cast<int64_t>(ctriv),
+                          false);
 
         LOG_debug << "Encrypted chunk: " << startpos << " - " << endpos << "   Size: " << chunksize;
 
@@ -836,17 +682,19 @@ byte* EncryptBufferByChunks::nextbuffer(unsigned bufsize)
 }
 
 // prepare chunk for uploading: mac and encrypt
-void HttpReqUL::prepare(const char* tempurl, SymmCipher* key,
-                        uint64_t ctriv, m_off_t pos,
+void HttpReqUL::prepare(const char* tempurl,
+                        SymmCipher* key,
+                        uint64_t ctriv,
+                        m_off_t uploadPosition,
                         m_off_t npos)
 {
     EncryptBufferByChunks eb((byte*)out->data(), key, &mChunkmacs, ctriv);
 
     string urlSuffix;
-    eb.encrypt(pos, npos, urlSuffix);
+    eb.encrypt(uploadPosition, npos, urlSuffix);
 
     // unpad for POSTing
-    size = (unsigned)(npos - pos);
+    size = (unsigned)(npos - uploadPosition);
     out->resize(size);
 
     setreq((tempurl + urlSuffix).c_str(), REQ_BINARY);
@@ -1063,7 +911,7 @@ void SpeedController::updateCircularBufferWithWeightedAverageForDeltaExceedingLi
 
     // Calculate the number of index positions to advance in the circular buffer
     auto deltaIndexPositions = deltaTimeFromPreviousCall / DS_PER_SECOND;
-    nextIndex(mCircularCurrentIndex, deltaIndexPositions);
+    nextIndex(mCircularCurrentIndex, static_cast<size_t>(deltaIndexPositions));
 
     // Exclude the actual second from the delta calculation
     delta = (aggregatedDeltaValuePerSecond * (SPEED_MEAN_CIRCULAR_BUFFER_SIZE_SECONDS - 1));

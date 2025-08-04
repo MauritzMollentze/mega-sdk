@@ -86,7 +86,7 @@ bool File::serialize(string *d) const
     d->append((char*)&ll, sizeof(ll));
     d->append(name.data(), ll);
 
-    auto tmpstr = getLocalname().platformEncoded();
+    auto tmpstr = getLocalname().serialize();
     ll = (unsigned short)tmpstr.size();
     d->append((char*)&ll, sizeof(ll));
     d->append(tmpstr.data(), ll);
@@ -123,7 +123,10 @@ bool File::serialize(string *d) const
 
     d->append((char*)&mCollisionResolution, 1);
 
-    d->append("\0\0\0\0\0\0\0", 8);
+    bool pathSerializedAsLocalPath = true;
+    d->append(reinterpret_cast<const char*>(&pathSerializedAsLocalPath), sizeof(bool));
+
+    d->append("\0\0\0\0\0\0", 7);
 
     if (hasChatAuth)
     {
@@ -230,7 +233,6 @@ File *File::unserialize(string *d)
     fp.reset();
 
     file->name.assign(name, namelen);
-    file->setLocalname(LocalPath::fromPlatformEncodedAbsolute(std::string(localname, localnamelen)));
     file->targetuser.assign(targetuser, targetuserlen);
     file->privauth.assign(privauth, privauthlen);
     file->pubauth.assign(pubauth, pubauthlen);
@@ -266,13 +268,33 @@ File *File::unserialize(string *d)
     }
     file->setCollisionResolution(static_cast<CollisionResolution>(collisionResolutionUint8));
 
-    if (memcmp(ptr, "\0\0\0\0\0\0\0", 8))
+    bool pathSerializedAsLocalPath = MemAccess::get<bool>(ptr);
+    ptr += sizeof(bool);
+
+    if (pathSerializedAsLocalPath)
+    {
+        auto localPath = LocalPath::unserialize(std::string(localname, localnamelen));
+        if (!localPath.has_value())
+        {
+            LOG_err << "File unserialization failed - invalid LocalPath";
+            delete file;
+            return NULL;
+        }
+        file->setLocalname(localPath.value());
+    }
+    else
+    {
+        file->setLocalname(
+            LocalPath::fromPlatformEncodedAbsolute(std::string(localname, localnamelen)));
+    }
+
+    if (memcmp(ptr, "\0\0\0\0\0\0", 7))
     {
         LOG_err << "File unserialization failed - invalid version";
         delete file;
         return NULL;
     }
-    ptr += 8;
+    ptr += 7;
 
     if (hasChatAuth)
     {
@@ -301,7 +323,7 @@ File *File::unserialize(string *d)
         }
     }
 
-    d->erase(0, ptr - d->data());
+    d->erase(0, static_cast<size_t>(ptr - d->data()));
     return file;
 }
 
@@ -352,11 +374,15 @@ void File::completed(Transfer* t, putsource_t source)
     }
 }
 
-
-void File::sendPutnodesOfUpload(MegaClient* client, UploadHandle fileAttrMatchHandle, const UploadToken& ultoken,
-                        const FileNodeKey& filekey, putsource_t source, NodeHandle ovHandle,
-                        CommandPutNodes::Completion&& completion,
-                        const m_time_t* overrideMtime, bool canChangeVault)
+void File::sendPutnodesOfUpload(MegaClient* client,
+                                UploadHandle fileAttrMatchHandle,
+                                const UploadToken& ultoken,
+                                const FileNodeKey& newFileKey,
+                                putsource_t source,
+                                NodeHandle ovHandle,
+                                CommandPutNodes::Completion&& completion,
+                                const m_time_t* overrideMtime,
+                                bool canChangeVault)
 {
     vector<NewNode> newnodes(1);
     NewNode* newnode = &newnodes[0];
@@ -372,8 +398,9 @@ void File::sendPutnodesOfUpload(MegaClient* client, UploadHandle fileAttrMatchHa
     newnode->uploadtoken = ultoken;
 
     // file's crypto key
-    static_assert(sizeof(filekey) == FILENODEKEYLENGTH, "File completed: filekey size doesn't match with FILENODEKEYLENGTH");
-    newnode->nodekey.assign((char*)&filekey, FILENODEKEYLENGTH);
+    static_assert(sizeof(newFileKey) == FILENODEKEYLENGTH,
+                  "File completed: filekey size doesn't match with FILENODEKEYLENGTH");
+    newnode->nodekey.assign((char*)&newFileKey, FILENODEKEYLENGTH);
     newnode->type = FILENODE;
     newnode->parenthandle = UNDEF;
 
@@ -394,8 +421,10 @@ void File::sendPutnodesOfUpload(MegaClient* client, UploadHandle fileAttrMatchHa
     attrs.getjson(&tattrstring);
 
     newnode->attrstring.reset(new string);
-    MegaClient::makeattr(client->getRecycledTemporaryTransferCipher(filekey.bytes.data(), FILENODE),
-                         newnode->attrstring, tattrstring.c_str());
+    MegaClient::makeattr(
+        client->getRecycledTemporaryTransferCipher(newFileKey.bytes.data(), FILENODE),
+        newnode->attrstring,
+        tattrstring.c_str());
 
     if (targetuser.size())
     {
@@ -508,8 +537,7 @@ void File::terminated(error)
 
 }
 
-// do not retry crypto errors or administrative takedowns; retry other types of
-// failuresup to 16 times, except I/O errors (6 times)
+// do not retry crypto errors or administrative takedowns
 bool File::failed(error e, MegaClient*)
 {
     if (e == API_EKEY)
@@ -517,15 +545,17 @@ bool File::failed(error e, MegaClient*)
         return false; // mac error; do not retry
     }
 
-    return  // Non fatal errors, up to 16 retries
-            ((e != API_EBLOCKED && e != API_ENOENT && e != API_EINTERNAL && e != API_EACCESS && e != API_ETOOMANY && transfer->failcount < 16)
-            // I/O errors up to 6 retries
-            && !((e == API_EREAD || e == API_EWRITE) && transfer->failcount > 6))
-            // Retry sync transfers up to 8 times for erros that doesn't have a specific management
-            // to prevent immediate retries triggered by the sync engine
-            || (syncxfer && e != API_EBLOCKED && e != API_EKEY && transfer->failcount <= 8)
-            // Infinite retries for storage overquota errors
-            || e == API_EOVERQUOTA || e == API_EGOINGOVERQUOTA;
+    return // Non fatal errors, up to FILE_MAX_RETRIES retries
+        ((e != API_EBLOCKED && e != API_ENOENT && e != API_EINTERNAL && e != API_EACCESS &&
+          e != API_ETOOMANY && transfer->failcount < FILE_MAX_RETRIES)
+         // I/O errors up to FILE_IO_MAX_RETRIES retries
+         && !((e == API_EREAD || e == API_EWRITE) && transfer->failcount > FILE_IO_MAX_RETRIES))
+        // Retry sync transfers up to FILE_SYNC_MAX_RETRIES times for erros that doesn't have a
+        // specific management to prevent immediate retries triggered by the sync engine
+        || (syncxfer && e != API_EBLOCKED && e != API_EKEY &&
+            transfer->failcount <= FILE_SYNC_MAX_RETRIES)
+        // Infinite retries for storage overquota errors
+        || e == API_EOVERQUOTA || e == API_EGOINGOVERQUOTA;
 }
 
 void File::displayname(string* dname)
@@ -578,7 +608,7 @@ void SyncTransfer_inClient::terminated(error e)
     selfKeepAlive.reset();  // deletes this object! (if abandoned by sync)
 }
 
-void SyncTransfer_inClient::completed(Transfer* t, putsource_t source)
+void SyncTransfer_inClient::completed(Transfer*, [[maybe_unused]] putsource_t source)
 {
     assert(source == PUTNODES_SYNC);
 
@@ -613,6 +643,12 @@ void SyncUpload_inClient::sendPutnodesOfUpload(MegaClient* client, NodeHandle ov
     // since we are now sending putnodes, no need to remember puts to inform the client on abandonment
     syncThreadSafeState->client()->transferBackstop.forget(tag);
 
+    if (sourceLocalname.toPath(false) == ".gitignore")
+    {
+        ovHandle.isUndef() ? client->sendevent(99493, "New .gitignore file synced up") :
+                             client->sendevent(99494, "Existing .gitignore file modified");
+    }
+
     File::sendPutnodesOfUpload(
         client,
         uploadHandle,
@@ -624,7 +660,7 @@ void SyncUpload_inClient::sendPutnodesOfUpload(MegaClient* client, NodeHandle ov
                              targettype_t t,
                              vector<NewNode>& nn,
                              bool targetOverride,
-                             int tag,
+                             int ownTag,
                              const map<string, string>& fileHandles)
         {
             // Is the originating transfer still alive?
@@ -658,7 +694,7 @@ void SyncUpload_inClient::sendPutnodesOfUpload(MegaClient* client, NodeHandle ov
 
             // since we used a completion function, putnodes_result is not called.
             // but the intermediate layer still needs that in order to call the client app back:
-            client->app->putnodes_result(e, t, nn, targetOverride, tag, fileHandles);
+            client->app->putnodes_result(e, t, nn, targetOverride, ownTag, fileHandles);
         },
         nullptr,
         syncThreadSafeState->mCanChangeVault);
@@ -669,6 +705,12 @@ void SyncUpload_inClient::sendPutnodesToCloneNode(MegaClient* client, NodeHandle
     // Always called from the client thread
     weak_ptr<SyncThreadsafeState> stts = syncThreadSafeState;
 
+    if (sourceLocalname.toPath(false) == ".gitignore")
+    {
+        ovHandle.isUndef() ? client->sendevent(99493, "New .gitignore file synced up") :
+                             client->sendevent(99494, "Existing .gitignore file modified");
+    }
+
     // So we know whether it's safe to update putnodesCompleted.
     weak_ptr<SyncUpload_inClient> self = shared_from_this();
 
@@ -678,10 +720,10 @@ void SyncUpload_inClient::sendPutnodesToCloneNode(MegaClient* client, NodeHandle
         PUTNODES_SYNC,
         ovHandle,
         [self, stts, client](const Error& e,
-                             targettype_t t,
+                             targettype_t /*t*/,
                              vector<NewNode>& nn,
-                             bool targetOverride,
-                             int tag,
+                             bool /*targetOverride*/,
+                             int /*tag*/,
                              const map<string, string>& /*fileHandles*/)
         {
             // Is the originating transfer still alive?
@@ -744,11 +786,15 @@ SyncUpload_inClient::SyncUpload_inClient(NodeHandle targetFolder, const LocalPat
     transfer = nullptr;
     tag = 0;
 
-    syncThreadSafeState = move(stss);
+    syncThreadSafeState = std::move(stss);
     syncThreadSafeState->transferBegin(PUT, size);
 
     sourceFsid = fsid;
     sourceLocalname = localname;
+
+    LOG_debug << "[SyncUpload_inClient()] Name: '" << getLocalname() << "'. Source local name: '"
+              << sourceLocalname.toPath(false) << "'. Source fsid: " << fsid
+              << ". Fingerprint: " << fingerprintDebugString();
 }
 
 SyncUpload_inClient::~SyncUpload_inClient()
@@ -778,6 +824,10 @@ SyncUpload_inClient::~SyncUpload_inClient()
     {
         syncThreadSafeState->removeExpectedUpload(h, name);
     }
+
+    LOG_debug << "[~SyncUpload_inClient()] Name: '" << getLocalname() << "'. Source local name: '"
+              << sourceLocalname.toPath(false) << "'. Source fsid: " << sourceFsid
+              << ". Fingerprint: " << fingerprintDebugString();
 }
 
 void SyncUpload_inClient::prepare(FileSystemAccess&)
@@ -793,6 +843,29 @@ void SyncUpload_inClient::prepare(FileSystemAccess&)
     //todo: localNode.treestate(TREESTATE_SYNCING);
 }
 
+void SyncUpload_inClient::updateFingerprint(const FileFingerprint& newFingerprint)
+{
+    if (wasStarted)
+    {
+        assert(false && "Trying to update fingerprint with the upload alredy started");
+        return;
+    }
+
+    if (size != newFingerprint.size)
+    {
+        // Reset transfer tracking values
+        syncThreadSafeState->transferFailed(PUT, size);
+        syncThreadSafeState->transferBegin(PUT, newFingerprint.size);
+    }
+
+    LOG_debug << "[SyncUpload_inClient::updateFingerprint] Name: '" << getLocalname()
+              << "'. Source fsid: " << sourceFsid
+              << ". Prev Fingerprint: " << fingerprintDebugString()
+              << ". New Fingerprint: " << newFingerprint.fingerprintDebugString();
+
+    FileFingerprint::operator=(newFingerprint);
+}
+
 SyncDownload_inClient::SyncDownload_inClient(CloudNode& n, const LocalPath& clocalname, bool fromInshare,
         shared_ptr<SyncThreadsafeState> stss, const FileFingerprint& overwriteFF)
 {
@@ -805,8 +878,12 @@ SyncDownload_inClient::SyncDownload_inClient(CloudNode& n, const LocalPath& cloc
 
     setLocalname(clocalname);
 
-    syncThreadSafeState = move(stss);
+    syncThreadSafeState = std::move(stss);
     syncThreadSafeState->transferBegin(GET, size);
+
+    LOG_debug << "[SyncDownload_inClient()] Name: '" << getLocalname() << "'. Handle: " << h
+              << ". Cloud Fingerprint: " << fingerprintDebugString()
+              << ". Local Fingerprint (overwrite): " << overwriteFF.fingerprintDebugString();
 }
 
 SyncDownload_inClient::~SyncDownload_inClient()
@@ -828,9 +905,13 @@ SyncDownload_inClient::~SyncDownload_inClient()
     {
         syncThreadSafeState->transferFailed(GET, size);
     }
+
+    LOG_debug << "[~SyncDownload_inClient()] Name: '" << getLocalname() << "'. Handle: " << h
+              << ". Cloud Fingerprint: " << fingerprintDebugString()
+              << ". Local Fingerprint (overwrite): " << okToOverwriteFF.fingerprintDebugString();
 }
 
-void SyncDownload_inClient::prepare(FileSystemAccess& fsaccess)
+void SyncDownload_inClient::prepare(FileSystemAccess&)
 {
     if (transfer->localfilename.empty())
     {

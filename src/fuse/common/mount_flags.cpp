@@ -1,15 +1,17 @@
 #include <cassert>
 #include <stdexcept>
 
+#include <mega/common/query.h>
+#include <mega/common/scoped_query.h>
 #include <mega/fuse/common/logging.h>
 #include <mega/fuse/common/mount_flags.h>
-#include <mega/fuse/common/query.h>
-#include <mega/fuse/common/scoped_query.h>
 
 namespace mega
 {
 namespace fuse
 {
+
+using namespace common;
 
 bool MountFlags::operator==(const MountFlags& rhs) const
 {
@@ -24,15 +26,15 @@ bool MountFlags::operator!=(const MountFlags& rhs) const
     return !(*this == rhs);
 }
 
-MountFlags MountFlags::deserialize(ScopedQuery& query)
+MountFlags MountFlags::deserialize(Query& query)
 try
 {
     MountFlags flags;
 
-    flags.mEnableAtStartup = query.field("enable_at_startup");
-    flags.mName = query.field("name").string();
-    flags.mPersistent = query.field("persistent");
-    flags.mReadOnly = query.field("read_only");
+    flags.mEnableAtStartup = query.field("enable_at_startup").get<bool>();
+    flags.mName = query.field("name").get<std::string>();
+    flags.mPersistent = query.field("persistent").get<bool>();
+    flags.mReadOnly = query.field("read_only").get<bool>();
 
     // Sanity.
     assert(!flags.mEnableAtStartup || flags.mPersistent);
@@ -46,22 +48,32 @@ catch (std::runtime_error& exception)
    throw;
 }
 
-void MountFlags::serialize(ScopedQuery& query) const
+MountFlags MountFlags::deserialize(ScopedQuery& query)
+{
+    return deserialize(query.query());
+}
+
+void MountFlags::serialize(Query& query) const
 try
 {
     // Sanity.
     assert(!mEnableAtStartup || mPersistent);
 
-    query.param(":enable_at_startup") = mEnableAtStartup;
-    query.param(":name") = mName;
-    query.param(":persistent") = mPersistent;
-    query.param(":read_only") = mReadOnly;
+    query.param(":enable_at_startup").set(mEnableAtStartup);
+    query.param(":name").set(mName);
+    query.param(":persistent").set(mPersistent);
+    query.param(":read_only").set(mReadOnly);
 }
 catch (std::runtime_error& exception)
 {
     FUSEErrorF("Unable to serialize mount flags: %s", exception.what());
 
     throw;
+}
+
+void MountFlags::serialize(ScopedQuery& query) const
+{
+    serialize(query.query());
 }
 
 } // fuse

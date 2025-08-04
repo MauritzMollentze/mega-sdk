@@ -31,6 +31,7 @@ static const char* NodeSearchFilterPtrStr = "NodeSearchFilterPtrStr";
 SqliteDbAccess::SqliteDbAccess(const LocalPath& rootPath)
   : mRootPath(rootPath)
 {
+    LOG_debug << "sqlite version: " << sqlite3_libversion();
     assert(mRootPath.isAbsolute());
 }
 
@@ -38,7 +39,7 @@ SqliteDbAccess::~SqliteDbAccess()
 {
 }
 
-LocalPath SqliteDbAccess::databasePath(const FileSystemAccess& fsAccess,
+LocalPath SqliteDbAccess::databasePath(const FileSystemAccess&,
                                        const string& name,
                                        const int version) const
 {
@@ -293,6 +294,22 @@ bool SqliteDbAccess::probe(FileSystemAccess& fsAccess, const string& name) const
     return fileAccess->isfile(dbPath);
 }
 
+std::optional<std::filesystem::path>
+    SqliteDbAccess::getExistingDbPath(const FileSystemAccess& fsAccess,
+                                      const std::string& fname) const
+{
+    auto expectedPath =
+        databasePath(fsAccess, fname, DbAccess::DB_VERSION).asPlatformEncoded(false);
+    if (std::filesystem::exists(expectedPath))
+        return expectedPath;
+
+    expectedPath =
+        databasePath(fsAccess, fname, DbAccess::LEGACY_DB_VERSION).asPlatformEncoded(false);
+    if (std::filesystem::exists(expectedPath))
+        return expectedPath;
+    return {};
+}
+
 const LocalPath& SqliteDbAccess::rootPath() const
 {
     return mRootPath;
@@ -339,7 +356,9 @@ bool SqliteDbAccess::openDBAndCreateStatecache(sqlite3 **db, FileSystemAccess &f
     return true;
 }
 
-bool SqliteDbAccess::renameDBFiles(mega::FileSystemAccess& fsAccess, mega::LocalPath& legacyPath, mega::LocalPath& dbPath)
+bool SqliteDbAccess::renameDBFiles(FileSystemAccess& fsAccess,
+                                   const LocalPath& legacyPath,
+                                   const LocalPath& dbPath)
 {
     // Main DB file should exits
     if (!fsAccess.renamelocal(legacyPath, dbPath))
@@ -351,8 +370,10 @@ bool SqliteDbAccess::renameDBFiles(mega::FileSystemAccess& fsAccess, mega::Local
 
 #if !(TARGET_OS_IPHONE)
     auto suffix = LocalPath::fromRelativePath("-shm");
-    auto from = legacyPath + suffix;
-    auto to = dbPath + suffix;
+    auto from = legacyPath;
+    from.append(suffix);
+    auto to = dbPath;
+    to.append(suffix);
 
     // -shm could or couldn't be present
     if (fileAccess->fopen(from, FSLogging::logExceptFileNotFound) && !fsAccess.renamelocal(from, to))
@@ -363,8 +384,10 @@ bool SqliteDbAccess::renameDBFiles(mega::FileSystemAccess& fsAccess, mega::Local
     }
 
     suffix = LocalPath::fromRelativePath("-wal");
-    from = legacyPath + suffix;
-    to = dbPath + suffix;
+    from = legacyPath;
+    from.append(suffix);
+    to = dbPath;
+    to.append(suffix);
 
     // -wal could or couldn't be present
     if (fileAccess->fopen(from, FSLogging::logExceptFileNotFound) && !fsAccess.renamelocal(from, to))
@@ -376,8 +399,10 @@ bool SqliteDbAccess::renameDBFiles(mega::FileSystemAccess& fsAccess, mega::Local
 #else
     // iOS doesn't use WAL mode, but Journal
     auto suffix = LocalPath::fromRelativePath("-journal");
-    auto from = legacyPath + suffix;
-    auto to = dbPath + suffix;
+    auto from = legacyPath;
+    from.append(suffix);
+    auto to = dbPath;
+    to.append(suffix);
 
     // -journal could or couldn't be present
     if (fileAccess->fopen(from, FSLogging::logExceptFileNotFound) && !fsAccess.renamelocal(from, to))
@@ -397,17 +422,18 @@ void SqliteDbAccess::removeDBFiles(FileSystemAccess& fsAccess, mega::LocalPath& 
     fsAccess.unlinklocal(dbPath);
 
 #if !(TARGET_OS_IPHONE)
-    auto suffix = LocalPath::fromRelativePath("-shm");
-    auto fileToRemove = dbPath + suffix;
+    auto fileToRemove = dbPath;
+    fileToRemove.insertFilenameSuffix("-shm");
     fsAccess.unlinklocal(fileToRemove);
 
-    suffix = LocalPath::fromRelativePath("-wal");
-    fileToRemove = dbPath + suffix;
+    fileToRemove = dbPath;
+    fileToRemove.insertFilenameSuffix("-wal");
     fsAccess.unlinklocal(fileToRemove);
 #else
     // iOS doesn't use WAL mode, but Journal
     auto suffix = LocalPath::fromRelativePath("-journal");
-    auto fileToRemove = dbPath + suffix;
+    auto fileToRemove = dbPath;
+    fileToRemove.append(suffix);
     fsAccess.unlinklocal(fileToRemove);
 
 #endif
@@ -504,8 +530,8 @@ bool SqliteDbAccess::migrateDataToColumns(sqlite3* db, vector<NewColumn>&& cols)
     {
         const char* blob = static_cast<const char*>(sqlite3_column_blob(stmt, 1));
         int blobSize = sqlite3_column_bytes(stmt, 1);
-        handle nh = sqlite3_column_int64(stmt, 0);
-        NodeData nd(blob, blobSize, NodeData::COMPONENT_ATTRS);
+        handle nh = static_cast<handle>(sqlite3_column_int64(stmt, 0));
+        NodeData nd(blob, static_cast<size_t>(blobSize), NodeData::COMPONENT_ATTRS);
 
         std::vector<std::unique_ptr<MigrateType>> migrateElement;
         migrateElement.reserve(cols.size());
@@ -584,7 +610,10 @@ bool SqliteDbAccess::migrateDataToColumns(sqlite3* db, vector<NewColumn>&& cols)
         }
 
         int stepResult;
-        if (sqlite3_bind_int64(stmt, static_cast<int>(cols.size()) + 1, update.first) != SQLITE_OK || // nodehandle
+        if (sqlite3_bind_int64(stmt,
+                               static_cast<int>(cols.size()) + 1,
+                               static_cast<sqlite3_int64>(update.first)) !=
+                SQLITE_OK || // nodehandle
             ((stepResult = sqlite3_step(stmt)) != SQLITE_DONE && stepResult != SQLITE_ROW) ||
             sqlite3_reset(stmt) != SQLITE_OK)
         {
@@ -629,7 +658,7 @@ SqliteDbTable::~SqliteDbTable()
 
     if (inTransaction())
     {
-        abort();
+        SqliteDbTable::abort(); // fully qualify virtual function
     }
 
     sqlite3_close(db);
@@ -688,9 +717,10 @@ bool SqliteDbTable::next(uint32_t* index, string* data)
         return false;
     }
 
-    *index = sqlite3_column_int(pStmt, 0);
+    *index = static_cast<uint32_t>(sqlite3_column_int(pStmt, 0));
 
-    data->assign((char*)sqlite3_column_blob(pStmt, 1), sqlite3_column_bytes(pStmt, 1));
+    data->assign(static_cast<const char*>(sqlite3_column_blob(pStmt, 1)),
+                 static_cast<size_t>(sqlite3_column_bytes(pStmt, 1)));
 
     return true;
 }
@@ -709,13 +739,14 @@ bool SqliteDbTable::get(uint32_t index, string* data)
     rc = sqlite3_prepare_v2(db, "SELECT content FROM statecache WHERE id = ?", -1, &stmt, NULL);
     if (rc == SQLITE_OK)
     {
-        rc = sqlite3_bind_int(stmt, 1, index);
+        rc = sqlite3_bind_int(stmt, 1, static_cast<int>(index));
         if (rc == SQLITE_OK)
         {
             rc = sqlite3_step(stmt);
             if (rc == SQLITE_ROW)
             {
-                data->assign((char*)sqlite3_column_blob(stmt, 0), sqlite3_column_bytes(stmt, 0));
+                data->assign(static_cast<const char*>(sqlite3_column_blob(stmt, 0)),
+                             static_cast<size_t>(sqlite3_column_bytes(stmt, 0)));
             }
         }
     }
@@ -748,10 +779,10 @@ bool SqliteDbTable::put(uint32_t index, char* data, unsigned len)
 
     if (sqlResult == SQLITE_OK)
     {
-        sqlResult = sqlite3_bind_int(mPutStmt, 1, index);
+        sqlResult = sqlite3_bind_int(mPutStmt, 1, static_cast<int>(index));
         if (sqlResult == SQLITE_OK)
         {
-            sqlResult = sqlite3_bind_blob(mPutStmt, 2, data, len, SQLITE_STATIC);
+            sqlResult = sqlite3_bind_blob(mPutStmt, 2, data, static_cast<int>(len), SQLITE_STATIC);
             if (sqlResult == SQLITE_OK)
             {
                 sqlResult = sqlite3_step(mPutStmt);
@@ -785,7 +816,7 @@ bool SqliteDbTable::del(uint32_t index)
 
     if (sqlResult == SQLITE_OK)
     {
-        sqlResult = sqlite3_bind_int(mDelStmt, 1, index);
+        sqlResult = sqlite3_bind_int(mDelStmt, 1, static_cast<int>(index));
         if (sqlResult == SQLITE_OK)
         {
             sqlResult = sqlite3_step(mDelStmt); // tipically SQLITE_DONE, but could be SQLITE_ROW if implementation returned removed row count
@@ -808,6 +839,7 @@ void SqliteDbTable::truncate()
     }
 
     checkTransaction();
+    assert(inTransaction());
 
     int rc = sqlite3_exec(db, "DELETE FROM statecache", 0, 0, NULL);
     errorHandler(rc, "Truncate ", false);
@@ -821,6 +853,7 @@ void SqliteDbTable::begin()
         return;
     }
 
+    assert(!inTransaction());
     LOG_debug << "DB transaction BEGIN " << dbfile;
     int rc = sqlite3_exec(db, "BEGIN", 0, 0, NULL);
     errorHandler(rc, "Begin transaction", false);
@@ -907,6 +940,10 @@ void SqliteDbTable::errorHandler(int sqliteError, const string& operation, bool 
         dbError = DBError::DB_ERROR_IO;
         break;
 
+    case SQLITE_CORRUPT:
+        dbError = DBError::DB_ERROR_CORRUPT;
+        break;
+
     default:
         dbError = DBError::DB_ERROR_UNKNOWN;
         break;
@@ -916,7 +953,7 @@ void SqliteDbTable::errorHandler(int sqliteError, const string& operation, bool 
     LOG_err << operation << ": " << dbfile << err;
     assert(!operation.c_str());
 
-    if (mDBErrorCallBack && dbError != DBError::DB_ERROR_UNKNOWN)
+    if (mDBErrorCallBack)
     {
         // Only notify DB errors related to disk-is-full and input/output failures
         mDBErrorCallBack(dbError);
@@ -939,36 +976,6 @@ int SqliteAccountState::progressHandler(void *param)
     return cancelFlag->isCancelled();
 }
 
-bool SqliteAccountState::processSqlQueryAllNodeTags(
-    sqlite3_stmt* stmt,
-    std::set<std::string>& tags,
-    std::function<bool(const std::string&)> isValidTagF)
-{
-    assert(stmt);
-    int sqlResult = SQLITE_ERROR;
-    while ((sqlResult = sqlite3_step(stmt)) == SQLITE_ROW)
-    {
-        const void* data = sqlite3_column_blob(stmt, 0);
-        int size = sqlite3_column_bytes(stmt, 0);
-        if (!data || !size)
-        {
-            continue;
-        }
-        std::string allTags(static_cast<const char*>(data), static_cast<size_t>(size));
-        const std::set<std::string> separatedTags = splitString(allTags, MegaClient::TAG_DELIMITER);
-        std::for_each(std::begin(separatedTags),
-                      std::end(separatedTags),
-                      [&tags, &isValidTagF](const std::string& t)
-                      {
-                          if (isValidTagF(t))
-                              tags.insert(t);
-                      });
-    }
-
-    errorHandler(sqlResult, "Process sql query for all node tags", true);
-    return sqlResult == SQLITE_DONE;
-}
-
 bool SqliteAccountState::processSqlQueryNodes(sqlite3_stmt *stmt, std::vector<std::pair<mega::NodeHandle, mega::NodeSerialized>>& nodes)
 {
     assert(stmt);
@@ -976,7 +983,7 @@ bool SqliteAccountState::processSqlQueryNodes(sqlite3_stmt *stmt, std::vector<st
     while ((sqlResult = sqlite3_step(stmt)) == SQLITE_ROW)
     {
         NodeHandle nodeHandle;
-        nodeHandle.set6byte(sqlite3_column_int64(stmt, 0));
+        nodeHandle.set6byte(static_cast<uint64_t>(sqlite3_column_int64(stmt, 0)));
 
         NodeSerialized node;
 
@@ -985,7 +992,8 @@ bool SqliteAccountState::processSqlQueryNodes(sqlite3_stmt *stmt, std::vector<st
         int size = sqlite3_column_bytes(stmt, 1);
         if (data && size)
         {
-            node.mNodeCounter = std::string(static_cast<const char*>(data), size);
+            node.mNodeCounter =
+                std::string(static_cast<const char*>(data), static_cast<size_t>(size));
         }
 
         // blob node
@@ -993,7 +1001,7 @@ bool SqliteAccountState::processSqlQueryNodes(sqlite3_stmt *stmt, std::vector<st
         size = sqlite3_column_bytes(stmt, 2);
         if (data && size)
         {
-            node.mNode = std::string(static_cast<const char*>(data), size);
+            node.mNode = std::string(static_cast<const char*>(data), static_cast<size_t>(size));
             nodes.insert(nodes.end(), std::make_pair(nodeHandle, std::move(node)));
         }
     }
@@ -1056,7 +1064,10 @@ void SqliteAccountState::updateCounter(NodeHandle nodeHandle, const std::string&
     {
         if ((sqlResult = sqlite3_bind_blob(mStmtUpdateNode, 1, nodeCounterBlob.data(), static_cast<int>(nodeCounterBlob.size()), SQLITE_STATIC)) == SQLITE_OK)
         {
-            if ((sqlResult = sqlite3_bind_int64(mStmtUpdateNode, 2, nodeHandle.as8byte())) == SQLITE_OK)
+            if ((sqlResult = sqlite3_bind_int64(
+                     mStmtUpdateNode,
+                     2,
+                     static_cast<sqlite3_int64>(nodeHandle.as8byte()))) == SQLITE_OK)
             {
                 sqlResult = sqlite3_step(mStmtUpdateNode);
             }
@@ -1088,9 +1099,14 @@ void SqliteAccountState::updateCounterAndFlags(NodeHandle nodeHandle, uint64_t f
     {
         if ((sqlResult = sqlite3_bind_blob(mStmtUpdateNodeAndFlags, 1, nodeCounterBlob.data(), static_cast<int>(nodeCounterBlob.size()), SQLITE_STATIC)) == SQLITE_OK)
         {
-            if ((sqlResult = sqlite3_bind_int64(mStmtUpdateNodeAndFlags, 2, flags)) == SQLITE_OK)
+            if ((sqlResult = sqlite3_bind_int64(mStmtUpdateNodeAndFlags,
+                                                2,
+                                                static_cast<sqlite3_int64>(flags))) == SQLITE_OK)
             {
-                if ((sqlResult = sqlite3_bind_int64(mStmtUpdateNodeAndFlags, 3, nodeHandle.as8byte())) == SQLITE_OK)
+                if ((sqlResult = sqlite3_bind_int64(
+                         mStmtUpdateNodeAndFlags,
+                         3,
+                         static_cast<sqlite3_int64>(nodeHandle.as8byte()))) == SQLITE_OK)
                 {
                     sqlResult = sqlite3_step(mStmtUpdateNodeAndFlags);
                 }
@@ -1109,8 +1125,10 @@ void SqliteAccountState::createIndexes()
     {
         return;
     }
+
     // Create index for column that is not primary key (which already has an index by default)
-    std::string sql = "CREATE INDEX IF NOT EXISTS parenthandleindex on nodes (parenthandle)";
+    std::string sql =
+        "CREATE INDEX IF NOT EXISTS parenthandleindex on nodes (parenthandle, type, name)";
     int result = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
     if (result)
     {
@@ -1147,7 +1165,7 @@ void SqliteAccountState::createIndexes()
         LOG_err << "Data base error while creating index (favindex): " << sqlite3_errmsg(db);
     }
 
-    sql = "CREATE INDEX IF NOT EXISTS ctimeindex on nodes (ctime)";
+    sql = "CREATE INDEX IF NOT EXISTS ctimeindex on nodes (type, ctime DESC)";
     result = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
     if (result)
     {
@@ -1197,8 +1215,8 @@ void SqliteAccountState::finalise()
     }
     mStmtSearchNodes.clear();
 
-    sqlite3_finalize(mStmtAllNodeTags);
-    mStmtAllNodeTags = nullptr;
+    sqlite3_finalize(mStmtNodeTagsBelow);
+    mStmtNodeTagsBelow = nullptr;
 
     sqlite3_finalize(mStmtNodesByFp);
     mStmtNodesByFp = nullptr;
@@ -1254,10 +1272,10 @@ bool SqliteAccountState::put(Node *node)
         node->serialize(&nodeSerialized);
         assert(nodeSerialized.size());
 
-        sqlite3_bind_int64(mStmtPutNode, 1, node->nodehandle);
-        sqlite3_bind_int64(mStmtPutNode, 2, node->parenthandle);
+        sqlite3_bind_int64(mStmtPutNode, 1, static_cast<sqlite3_int64>(node->nodehandle));
+        sqlite3_bind_int64(mStmtPutNode, 2, static_cast<sqlite3_int64>(node->parenthandle));
 
-        std::string name = node->displayname();
+        std::string name = node->displayname(Node::LOG_CONDITION_DISABLE_NO_KEY);
         sqlite3_bind_text(mStmtPutNode, 3, name.c_str(), static_cast<int>(name.length()), SQLITE_STATIC);
 
         string fp;
@@ -1265,7 +1283,7 @@ bool SqliteAccountState::put(Node *node)
         sqlite3_bind_blob(mStmtPutNode, 4, fp.data(), static_cast<int>(fp.size()), SQLITE_STATIC);
 
         std::string origFingerprint;
-        attr_map::const_iterator attrIt = node->attrs.map.find(MAKENAMEID2('c', '0'));
+        attr_map::const_iterator attrIt = node->attrs.map.find(makeNameid("c0"));
         if (attrIt != node->attrs.map.end())
         {
            origFingerprint = attrIt->second;
@@ -1284,7 +1302,7 @@ bool SqliteAccountState::put(Node *node)
         sqlite3_bind_int(mStmtPutNode, 8, fav);
         sqlite3_bind_int64(mStmtPutNode, 9, node->ctime);
         sqlite3_bind_int64(mStmtPutNode, 10, node->mtime);
-        sqlite3_bind_int64(mStmtPutNode, 11, node->getDBFlags());
+        sqlite3_bind_int64(mStmtPutNode, 11, static_cast<sqlite3_int64>(node->getDBFlags()));
         std::string nodeCountersBlob = node->getCounter().serialize();
         sqlite3_bind_blob(mStmtPutNode,
                           12,
@@ -1361,7 +1379,10 @@ bool SqliteAccountState::getNode(NodeHandle nodehandle, NodeSerialized &nodeSeri
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtGetNode, 1, nodehandle.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtGetNode,
+                                            1,
+                                            static_cast<sqlite3_int64>(nodehandle.as8byte()))) ==
+            SQLITE_OK)
         {
             if((sqlResult = sqlite3_step(mStmtGetNode)) == SQLITE_ROW)
             {
@@ -1373,8 +1394,10 @@ bool SqliteAccountState::getNode(NodeHandle nodehandle, NodeSerialized &nodeSeri
 
                 if (dataNodeCounter && sizeNodeCounter && dataNodeSerialized && sizeNodeSerialized)
                 {
-                    nodeSerialized.mNodeCounter.assign(static_cast<const char*>(dataNodeCounter), sizeNodeCounter);
-                    nodeSerialized.mNode.assign(static_cast<const char*>(dataNodeSerialized), sizeNodeSerialized);
+                    nodeSerialized.mNodeCounter.assign(static_cast<const char*>(dataNodeCounter),
+                                                       static_cast<size_t>(sizeNodeCounter));
+                    nodeSerialized.mNode.assign(static_cast<const char*>(dataNodeSerialized),
+                                                static_cast<size_t>(sizeNodeSerialized));
                     success = true;
                 }
             }
@@ -1458,7 +1481,20 @@ bool SqliteAccountState::getNodesWithSharesOrLink(std::vector<std::pair<NodeHand
 
     sqlite3_stmt *stmt = nullptr;
     bool result = false;
-    int sqlResult = sqlite3_prepare_v2(db, "SELECT nodehandle, counter, node FROM nodes WHERE share & ? != 0", -1, &stmt, NULL);
+    int sqlResult = sqlite3_prepare_v2(
+        db,
+        "SELECT nodehandle, counter, node FROM nodes WHERE "
+        "(?1 = 1 AND share = 1 OR share = 3 OR share = 5 OR share = 7 OR share = "
+        "9 OR share = 11  OR share = 13 OR share = 15) OR"
+        "(?1 = 2 AND share = 2 OR share = 3 OR share = 6 OR share = 7 OR share = "
+        "10 OR share = 11  OR share = 14 OR share = 15) OR"
+        "(?1 = 4 AND share = 4 OR share = 5 OR share = 6 OR share = 7 OR share = "
+        "12 OR share = 13  OR share = 14 OR share = 15) OR"
+        "(?1 = 8 AND share = 8 OR share = 9 OR share = 10 OR share = 11 OR share "
+        "= 12 OR share = 13  OR share = 14 OR share = 15)",
+        -1,
+        &stmt,
+        NULL);
     if (sqlResult == SQLITE_OK)
     {
         if ((sqlResult = sqlite3_bind_int(stmt, 1, static_cast<int>(shareType))) == SQLITE_OK)
@@ -1490,11 +1526,14 @@ uint64_t SqliteAccountState::getNumberOfChildren(NodeHandle parentHandle)
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtNumChildren, 1, parentHandle.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtNumChildren,
+                                            1,
+                                            static_cast<sqlite3_int64>(parentHandle.as8byte()))) ==
+            SQLITE_OK)
         {
             if ((sqlResult = sqlite3_step(mStmtNumChildren)) == SQLITE_ROW)
             {
-               numChildren = sqlite3_column_int64(mStmtNumChildren, 0);
+                numChildren = static_cast<uint64_t>(sqlite3_column_int64(mStmtNumChildren, 0));
             }
         }
     }
@@ -1627,8 +1666,8 @@ bool SqliteAccountState::getChildren(const mega::NodeSearchFilter& filter,
             "SELECT nodehandle, counter, node "s +
             "FROM nodes "
             "WHERE (parenthandle = " + idParentHand + ") " // Versions aren't taken in consideration
-            "AND matchFilter(" + idFilter + ", flags, type, ctime, mtime, mimetypeVirtual, name, description, tags, fav)"
-            "ORDER BY \n" +
+             "AND matchFilter(" + idFilter + ", flags, type, ctime, mtime, mimetypeVirtual, name, description, tags, fav)"
+             "ORDER BY \n" +
             OrderByClause::get(order) + " \n" +
             "LIMIT " + idPageSize + " OFFSET " + idPageOff;
         // clang-format on
@@ -1659,84 +1698,196 @@ bool SqliteAccountState::getChildren(const mega::NodeSearchFilter& filter,
     return result;
 }
 
-bool SqliteAccountState::getAllNodeTags(const std::string& searchString,
-                                        std::set<std::string>& tags,
-                                        CancelToken cancelFlag)
+auto SqliteAccountState::getNodeTagsBelow(CancelToken cancelToken,
+                                          NodeHandle handle,
+                                          const std::string& pattern)
+    -> std::optional<std::set<std::string>>
 {
-    if (!db)
+    // Convenience.
+    static auto failed = [](const std::string& message)
     {
-        LOG_err << "SqliteAccountState::getAllNodeTags: Invalid db";
-        return false;
-    }
+        LOG_err << "SqliteAccountState::getNodeTagsBelow: " << message;
+        return std::nullopt;
+    }; // failed
 
-    // When early returning, this gets executed
-    int sqlResult = SQLITE_OK;
-    const MrProper cleanUp(
-        [this, &sqlResult]()
+    static auto couldntBindParameter = [](auto index)
+    {
+        static const std::string message = "Couldn't bind parameter ?";
+        return failed(message + std::to_string(index));
+    }; // couldntBindParameter
+
+    // Our database isn't in a usable state.
+    if (!db)
+        return failed("Invalid database");
+
+    // Transmit to global error handler on return.
+    auto result = SQLITE_OK;
+
+    // Transmits our result to the global error handler on return.
+    auto cleanup = makeScopedDestructor(
+        [&]()
         {
-            // unregister the handler (no-op if not registered)
+            // Remove any active progress handler.
             sqlite3_progress_handler(db, -1, nullptr, nullptr);
-            errorHandler(sqlResult, "Get all node tags", true);
-            sqlite3_reset(mStmtAllNodeTags);
-        });
+            // Transmit result to global error handler.
+            errorHandler(result, "Get node tags below", true);
+            // Make sure our statement's in a reusable state.
+            sqlite3_reset(mStmtNodeTagsBelow);
+        }); // cleanup
 
-    if (cancelFlag.exists())
+    // Caller wants to be able to abort the query.
+    if (cancelToken.exists())
     {
         sqlite3_progress_handler(db,
                                  NUM_VIRTUAL_MACHINE_INSTRUCTIONS,
                                  SqliteAccountState::progressHandler,
-                                 static_cast<void*>(&cancelFlag));
+                                 static_cast<void*>(&cancelToken));
     }
 
-    static const std::string selectStmBase{R"(
-        SELECT DISTINCT tags
-            FROM nodes
-            WHERE
-                tags IS NOT NULL AND
-                tags != '' AND
-                (?1 = 0 OR (tags REGEXP ?2))
-    )"};
-
-    // Ensure stmt is valid
-    if (!mStmtAllNodeTags &&
-        (SQLITE_OK !=
-         (sqlResult =
-              sqlite3_prepare_v2(db, selectStmBase.c_str(), -1, &mStmtAllNodeTags, nullptr))))
+    // Statement needs to be instantiated.
+    if (!mStmtNodeTagsBelow)
     {
-        return false;
+        // This query retrieves all the tags below some particular node or
+        // below all root nodes in the user's account by performing a
+        // breadth-first traversal from those nodes.
+        //
+        // The way the query works is basically by populating a virtual
+        // table repeatedly. For instance, in the first step, we ask which
+        // nodes are below a particular node. That'll produce a result set
+        // containing that node's direct children.
+        //
+        // The engine then performs the same query on that exact result set
+        // which will produce a result set containing the descendants of
+        // those children.
+        //
+        // The process repeats until there are no more directories to
+        // traverse into.
+        //
+        // Note that this query does not descend down file version chains.
+        auto query = "with recursive tags (nodehandle, tags, type) as ( "
+                     "select n.nodehandle "
+                     "     , n.tags "
+                     "     , n.type "
+                     "  from nodes as n "
+                     " where ((?1 = 0 and n.parenthandle = -1) "
+                     "        or (?1 = 1 and n.nodehandle = ?2)) "
+                     "    and n.type != 0 "
+                     " union "
+                     "select n.nodehandle "
+                     "     , n.tags "
+                     "     , n.type "
+                     "  from tags as t "
+                     " inner join nodes as n "
+                     "    on n.parenthandle = t.nodehandle "
+                     "   and t.type != 0 "
+                     " where n.type != 0 "
+                     "    or n.tags is not null "
+                     "   and n.tags != '' "
+                     ") "
+                     "select distinct "
+                     "       tags "
+                     "  from tags "
+                     " where tags is not null "
+                     "   and tags != '' "
+                     "   and (?3 = 0 or tags regexp ?4)";
+
+        // Try and instantiate our statement.
+        result = sqlite3_prepare_v2(db, query, -1, &mStmtNodeTagsBelow, nullptr);
+
+        // Couldn't instantiate statement.
+        if (result != SQLITE_OK)
+            return failed("Couldn't prepare query");
     }
-    // The search string has something different from *?
-    bool therIsSomethingToSearch = std::any_of(searchString.begin(),
-                                               searchString.end(),
-                                               [](const char& c)
-                                               {
-                                                   return c != '*';
-                                               });
-    const std::string asteriskSurroundSearch = ensureAsteriskSurround(searchString);
 
-    if (SQLITE_OK != (sqlResult = sqlite3_bind_int(mStmtAllNodeTags, 1, therIsSomethingToSearch)) ||
-        SQLITE_OK != (sqlResult = sqlite3_bind_text(mStmtAllNodeTags,
-                                                    2,
-                                                    asteriskSurroundSearch.c_str(),
-                                                    static_cast<int>(asteriskSurroundSearch.size()),
-                                                    SQLITE_STATIC)))
+    // Clarity.
+    enum ParameterIndex
     {
-        return false;
-    }
+        PARAM_HAS_NODE_HANDLE = 1,
+        PARAM_NODE_HANDLE,
+        PARAM_HAS_PATTERN,
+        PARAM_PATTERN
+    }; // ParameterIndex
 
-    if (therIsSomethingToSearch)
+    // Let the query know if we have a search root.
+    result = sqlite3_bind_int64(mStmtNodeTagsBelow, PARAM_HAS_NODE_HANDLE, !handle.isUndef());
+
+    // Couldn't bind parameter.
+    if (result != API_OK)
+        return couldntBindParameter(PARAM_HAS_NODE_HANDLE);
+
+    // Let the query know which node we're searching below.
+    result = sqlite3_bind_int64(mStmtNodeTagsBelow,
+                                PARAM_NODE_HANDLE,
+                                static_cast<std::int64_t>(handle.as8byte()));
+
+    // Couldn't bind parameter.
+    if (result != API_OK)
+        return couldntBindParameter(PARAM_NODE_HANDLE);
+
+    // Generate effective pattern.
+    auto effectivePattern = ensureAsteriskSurround(pattern);
+
+    // Let the query know if the caller's provided a pattern.
+    result = sqlite3_bind_int(mStmtNodeTagsBelow, PARAM_HAS_PATTERN, !pattern.empty());
+
+    // Couldn't bind parameter.
+    if (result != API_OK)
+        return couldntBindParameter(PARAM_HAS_PATTERN);
+
+    // Let the query know what the pattern is.
+    result = sqlite3_bind_text(mStmtNodeTagsBelow,
+                               PARAM_PATTERN,
+                               effectivePattern.c_str(),
+                               static_cast<int>(effectivePattern.size()),
+                               SQLITE_STATIC);
+
+    // Couldn't bind parameter.
+    if (result != API_OK)
+        return couldntBindParameter(PARAM_PATTERN);
+
+    std::set<std::string> tags;
+
+    // Process each result row.
+    while (result != SQLITE_DONE)
     {
-        const auto tagValidator = [&pattern = asteriskSurroundSearch](const std::string& tag)
+        // Try and retrieve a row from the database.
+        result = sqlite3_step(mStmtNodeTagsBelow);
+
+        // Couldn't get a row from the database.
+        if (result != SQLITE_DONE && result != SQLITE_ROW)
+            return failed("Couldn't retrieve row from database");
+
+        // Get our hands on this node's delimited list of tags.
+        auto* data = reinterpret_cast<const char*>(sqlite3_column_blob(mStmtNodeTagsBelow, 0));
+
+        // How large is the node's delimited list of tags?
+        auto size = static_cast<std::size_t>(sqlite3_column_bytes(mStmtNodeTagsBelow, 0));
+
+        // Delimited list of tags is null or empty.
+        if (!data || !size)
+            continue;
+
+        // Separate individual tags.
+        auto individualTags =
+            splitString<decltype(tags)>(std::string(data, size), MegaClient::TAG_DELIMITER);
+
+        // Collect the tags that satisfy our pattern.
+        for (auto i = individualTags.begin(); i != individualTags.end();)
         {
-            return likeCompare(pattern.c_str(), tag.c_str(), 0);
-        };
-        return processSqlQueryAllNodeTags(mStmtAllNodeTags, tags, tagValidator);
+            // Convenience.
+            auto j = i++;
+
+            // Not interested in this node.
+            if (!pattern.empty() && !likeCompare(effectivePattern.c_str(), j->c_str(), false))
+                continue;
+
+            // Move tag into tags set.
+            tags.insert(individualTags.extract(j));
+        }
     }
-    static const auto alwaysTrueF = [](const std::string&)
-    {
-        return true;
-    };
-    return processSqlQueryAllNodeTags(mStmtAllNodeTags, tags, alwaysTrueF);
+
+    // Return tags to caller.
+    return std::optional<decltype(tags)>(std::in_place, std::move(tags));
 }
 
 bool SqliteAccountState::searchNodes(const NodeSearchFilter& filter,
@@ -1828,14 +1979,14 @@ bool SqliteAccountState::searchNodes(const NodeSearchFilter& filter,
                 "WHERE (" + idAncestor1 + " != " + undefStr + " AND nodehandle = " + idAncestor1 + ") "
                 "OR (" + idAncestor2 + " != " + undefStr + " AND nodehandle = " + idAncestor2 + ") "
                 "OR (" + idAncestor3 + " != " + undefStr + " AND nodehandle = " + idAncestor3 + ") "
-                "OR (" + idIncShares + " != " + noShareStr + " AND nodehandle IN "
-                    "(SELECT nodehandle FROM nodes WHERE share = " + idIncShares + ")))";
+                "OR (" + idIncShares + " != " + noShareStr + " AND type != " + filenodeStr + " AND share & " + idIncShares + " != 0))";
 
         static const std::string nodesOfShares =
             "nodesOfShares(" + columnsForNodeAndFilters + ") \n"
             "AS (SELECT " + columnsForNodeAndFilters + " \n"
                 "FROM nodes \n"
-                "WHERE " + idIncShares + " != " + noShareStr + " AND share = " + idIncShares + ")";
+                "WHERE parenthandle NOT IN (SELECT nodehandle FROM ancestors) AND "
+                + idIncShares + " != " + noShareStr + " AND share & " + idIncShares + " != 0)";
 
         static const std::string nodesCTE =
             "nodesCTE(" + columnsForNodeAndFilters + ") \n"
@@ -1877,7 +2028,7 @@ bool SqliteAccountState::searchNodes(const NodeSearchFilter& filter,
             nodesCTE + ", \n\n" +
             nodesAfterFilters + "\n\n" +
             "SELECT " + columnsForNodeAndOrderBy + " \n"
-            "FROM nodesAfterFilters \n"
+            "FROM nodesAfterFilters GROUP BY nodehandle\n" // Avoid duplicates after union of nodesOfShares and nodesCTE
             "ORDER BY \n" +
             OrderByClause::get(order) + " \n" +
             "LIMIT " + idPageSize + " OFFSET " + idPageOff;
@@ -2057,11 +2208,15 @@ bool SqliteAccountState::getFavouritesHandles(NodeHandle node, uint32_t count, s
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtFavourites, 1, node.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtFavourites,
+                                            1,
+                                            static_cast<sqlite3_int64>(node.as8byte()))) ==
+            SQLITE_OK)
         {
             while ((sqlResult = sqlite3_step(mStmtFavourites)) == SQLITE_ROW && (nodes.size() < count || count == 0))
             {
-                nodes.push_back(NodeHandle().set6byte(sqlite3_column_int64(mStmtFavourites, 0)));
+                nodes.push_back(NodeHandle().set6byte(
+                    static_cast<uint64_t>(sqlite3_column_int64(mStmtFavourites, 0))));
             }
         }
     }
@@ -2094,7 +2249,10 @@ bool SqliteAccountState::childNodeByNameType(NodeHandle parentHandle, const std:
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtChildNode, 1, parentHandle.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtChildNode,
+                                            1,
+                                            static_cast<sqlite3_int64>(parentHandle.as8byte()))) ==
+            SQLITE_OK)
         {
             if ((sqlResult = sqlite3_bind_text(mStmtChildNode, 2, name.c_str(), static_cast<int>(name.length()), SQLITE_STATIC)) == SQLITE_OK)
             {
@@ -2143,13 +2301,16 @@ bool SqliteAccountState::getNodeSizeTypeAndFlags(NodeHandle node, m_off_t& size,
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtTypeAndSizeNode, 1, node.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtTypeAndSizeNode,
+                                            1,
+                                            static_cast<sqlite3_int64>(node.as8byte()))) ==
+            SQLITE_OK)
         {
             if ((sqlResult = sqlite3_step(mStmtTypeAndSizeNode)) == SQLITE_ROW)
             {
                nodeType = (nodetype_t)sqlite3_column_int(mStmtTypeAndSizeNode, 0);
                size = sqlite3_column_int64(mStmtTypeAndSizeNode, 1);
-               oldFlags = sqlite3_column_int64(mStmtTypeAndSizeNode, 2);
+               oldFlags = static_cast<uint64_t>(sqlite3_column_int64(mStmtTypeAndSizeNode, 2));
             }
         }
     }
@@ -2191,9 +2352,15 @@ bool SqliteAccountState::isAncestor(NodeHandle node, NodeHandle ancestor, Cancel
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtIsAncestor, 1, node.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtIsAncestor,
+                                            1,
+                                            static_cast<sqlite3_int64>(node.as8byte()))) ==
+            SQLITE_OK)
         {
-            if ((sqlResult = sqlite3_bind_int64(mStmtIsAncestor, 2, ancestor.as8byte())) == SQLITE_OK)
+            if ((sqlResult = sqlite3_bind_int64(mStmtIsAncestor,
+                                                2,
+                                                static_cast<sqlite3_int64>(ancestor.as8byte()))) ==
+                SQLITE_OK)
             {
                 if ((sqlResult = sqlite3_step(mStmtIsAncestor)) == SQLITE_ROW)
                 {
@@ -2230,7 +2397,7 @@ uint64_t SqliteAccountState::getNumberOfNodes()
     {
         if ((sqlResult = sqlite3_step(stmt)) == SQLITE_ROW)
         {
-            count = sqlite3_column_int64(stmt, 0);
+            count = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
         }
     }
 
@@ -2260,13 +2427,16 @@ uint64_t SqliteAccountState::getNumberOfChildrenByType(NodeHandle parentHandle, 
 
     if (sqlResult == SQLITE_OK)
     {
-        if ((sqlResult = sqlite3_bind_int64(mStmtNumChild, 1, parentHandle.as8byte())) == SQLITE_OK)
+        if ((sqlResult = sqlite3_bind_int64(mStmtNumChild,
+                                            1,
+                                            static_cast<sqlite3_int64>(parentHandle.as8byte()))) ==
+            SQLITE_OK)
         {
             if ((sqlResult = sqlite3_bind_int(mStmtNumChild, 2, nodeType)) == SQLITE_OK)
             {
                 if ((sqlResult = sqlite3_step(mStmtNumChild)) == SQLITE_ROW)
                 {
-                    count = sqlite3_column_int64(mStmtNumChild, 0);
+                    count = static_cast<uint64_t>(sqlite3_column_int64(mStmtNumChild, 0));
                 }
             }
         }
@@ -2358,14 +2528,18 @@ void SqliteAccountState::userMatchFilter(sqlite3_context* context, int argc, sql
         assert(false);
         return;
     }
-    // Versioning
-    constexpr int64_t versionFlag = 1 << Node::FLAGS_IS_VERSION;
-    const int64_t flags = sqlite3_value_int64(argv[1]);
-    if ((flags & versionFlag) != 0)
-        return;
 
     auto filter = static_cast<const NodeSearchFilter*>(
         sqlite3_value_pointer(argv[0], NodeSearchFilterPtrStr));
+
+    const int64_t flags = sqlite3_value_int64(argv[1]);
+    // Do not include versions
+    if (!filter->includeVersions())
+    {
+        constexpr int64_t versionFlag = 1 << Node::FLAGS_IS_VERSION;
+        if ((flags & versionFlag) != 0)
+            return;
+    }
 
     // type
     const nodetype_t type = static_cast<nodetype_t>(sqlite3_value_int(argv[2]));

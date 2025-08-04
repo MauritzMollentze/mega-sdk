@@ -38,9 +38,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface MEGASearchFilter : NSObject
 
-@property NSString* term;
-@property MEGASearchFilterTimeFrame* _Nullable creationTimeFrame;
-@property MEGASearchFilterTimeFrame* _Nullable modificationTimeFrame;
+@property NSString * term;
+@property NSString * _Nullable searchDescription;
+@property NSString * _Nullable searchTag;
+@property MEGASearchFilterTimeFrame * _Nullable creationTimeFrame;
+@property MEGASearchFilterTimeFrame * _Nullable modificationTimeFrame;
 @property uint64_t parentNodeHandle;
 
 /**
@@ -100,7 +102,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (readonly, nonatomic) MEGASearchFilterFavouriteOption favouriteFilter;
 
 @property int locationType;
+@property BOOL useAndForTextQuery;
 
+// TODO: This is a temporary proxy to support existing higher modules calls without having to modify their code. To be removed before Search By Description feature is fully implemented.
 - (instancetype)initWithTerm:(NSString *)term
             parentNodeHandle:(uint64_t)parentNodeHandle
                     nodeType:(MEGANodeType)nodeType
@@ -110,6 +114,7 @@ NS_ASSUME_NONNULL_BEGIN
            creationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)creationTimeFrame
        modificationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)modificationTimeFrame;
 
+// TODO: This is a temporary proxy to support existing higher modules calls without having to modify their code. To be removed before Search By Description feature is fully implemented.
 - (instancetype)initWithTerm:(NSString *)term
                     nodeType:(MEGANodeType)nodeType
                     category:(MEGANodeFormatType)category
@@ -120,22 +125,28 @@ NS_ASSUME_NONNULL_BEGIN
        modificationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)modificationTimeFrame;
 
 - (instancetype)initWithTerm:(NSString *)term
+                 description:(NSString * _Nullable)description
+                         tag:(NSString * _Nullable)tag
             parentNodeHandle:(uint64_t)parentNodeHandle
-                    nodeType:(int)nodeType
-                    category:(int)category
-                 sensitivity:(bool)sensitivity
-             favouriteFilter:(int)favouriteFilter
-           creationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)creationTimeFrame
-       modificationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)modificationTimeFrame DEPRECATED_ATTRIBUTE;
+                    nodeType:(MEGANodeType)nodeType
+                    category:(MEGANodeFormatType)category
+             sensitiveFilter:(MEGASearchFilterSensitiveOption)sensitiveFilter
+             favouriteFilter:(MEGASearchFilterFavouriteOption)favouriteFilter
+           creationTimeFrame:(MEGASearchFilterTimeFrame * _Nullable)creationTimeFrame
+       modificationTimeFrame:(MEGASearchFilterTimeFrame * _Nullable)modificationTimeFrame
+          useAndForTextQuery:(BOOL)useAndForTextQuery;
 
 - (instancetype)initWithTerm:(NSString *)term
-                    nodeType:(int)nodeType
-                    category:(int)category
-                 sensitivity:(bool)sensitivity
-             favouriteFilter:(int)favouriteFilter
+                 description:(NSString * _Nullable)description
+                         tag:(NSString * _Nullable)tag
+                    nodeType:(MEGANodeType)nodeType
+                    category:(MEGANodeFormatType)category
+             sensitiveFilter:(MEGASearchFilterSensitiveOption)sensitiveFilter
+             favouriteFilter:(MEGASearchFilterFavouriteOption)favouriteFilter
                 locationType:(int)locationType
-           creationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)creationTimeFrame
-       modificationTimeFrame:(MEGASearchFilterTimeFrame* _Nullable)modificationTimeFrame DEPRECATED_ATTRIBUTE;
+           creationTimeFrame:(MEGASearchFilterTimeFrame * _Nullable)creationTimeFrame
+       modificationTimeFrame:(MEGASearchFilterTimeFrame * _Nullable)modificationTimeFrame
+          useAndForTextQuery:(BOOL)useAndForTextQuery;
 
 - (BOOL)didSetParentNodeHandle;
 - (BOOL)didSetLocationType;

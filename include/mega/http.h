@@ -42,16 +42,16 @@
 #pragma warning(pop)
 #endif
 
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
 #include <netinet/in.h>
 #endif
 
 namespace mega {
 
 #ifdef _WIN32
-    const char* mega_inet_ntop(int af, const void* src, char* dst, int cnt);
+const char* mega_inet_ntop(int af, const void* src, char* dst, int cnt);
 #else
-    #define mega_inet_ntop inet_ntop
+#define mega_inet_ntop inet_ntop
 #endif
 
 // SSL public key pinning - active key
@@ -173,11 +173,6 @@ namespace mega {
 // active and backup keys use the same exponent
 #define SFUSTATSSSLEXPONENTSIZE "\x03"
 #define SFUSTATSSSLEXPONENT "\x01\x00\x01"
-
-#define MEGA_DNS_SERVERS "2001:678:25c:2215::554,89.44.169.136," \
-                         "2001:678:25c:2215::559,89.44.169.141," \
-                         "2a0b:e40:3::14,66.203.127.16," \
-                         "2a0b:e40:3::16,66.203.127.14"
 
 class MEGA_API SpeedController
 {
@@ -309,12 +304,6 @@ struct MEGA_API HttpIO : public EventTrigger
     // get proxy settings from the system
     virtual Proxy *getautoproxy();
 
-    // get alternative DNS servers
-    void getMEGADNSservers(string* dnsservers, bool getfromnetwork);
-
-    // get DNS servers as configured in the system
-    void getDNSserversFromIos(string &dnsServers);
-
     // set max download speed
     virtual bool setmaxdownloadspeed(m_off_t bpslimit);
 
@@ -331,6 +320,9 @@ struct MEGA_API HttpIO : public EventTrigger
 
     HttpIO();
     virtual ~HttpIO() { }
+
+    virtual void setproxy(const Proxy&);
+    virtual std::optional<Proxy> getproxy() const;
 };
 
 // outgoing HTTP request
@@ -381,15 +373,19 @@ struct MEGA_API HttpReq
     // Content-Type of the response
     string contenttype;
 
+    // Hashcash data extracted from X-Hashcash header of cs response, if any
+    string mHashcashToken;
+    uint8_t mHashcashEasiness{};
+
+    // If the request DNS resolution has failed
+    bool mDnsFailure = false;
+
     // HttpIO implementation-specific identifier for this connection
     void* httpiohandle;
 
     // while this request is in flight, points to the application's HttpIO
     // object - NULL otherwise
     HttpIO* httpio;
-
-    // identify different channels from different MegaClients etc in the log
-    string logname;
 
     // set url and content type for subsequent requests
     void setreq(const char*, contenttype_t);
@@ -437,9 +433,6 @@ struct MEGA_API HttpReq
     // set response content length
     void setcontentlength(m_off_t);
 
-    // reserve space for incoming data
-    byte* reserveput(unsigned* len);
-
     // disconnect open HTTP connection
     void disconnect();
 
@@ -461,6 +454,33 @@ struct MEGA_API HttpReq
 
     // true if HTTP response status code is 3xx redirection
     bool isRedirection() const { return (httpstatus / 100) == 3; }
+
+    /**
+     * @brief Get an unique identifier for this object
+     */
+    uint32_t getId() const
+    {
+        return reqId;
+    }
+
+    const std::string& getLogName() const
+    {
+        return logname;
+    }
+
+    void setLogName(const std::string& newLogName)
+    {
+        logname += newLogName;
+    }
+
+private:
+    static std::atomic_uint32_t nextReqId;
+    const uint32_t reqId;
+
+    // identify different channels from different MegaClients etc in the log
+    std::string logname;
+
+    void prepareMethod(HttpIO* clientHttpIo, const httpmethod_t reqMethod);
 };
 
 struct MEGA_API GenericHttpReq : public HttpReq

@@ -1,6 +1,6 @@
 /**
  * @file mega/posix/meganet.h
- * @brief POSIX network access layer (using cURL + c-ares)
+ * @brief POSIX network access layer (using cURL)
  *
  * (c) 2013-2014 by Mega Limited, Auckland, New Zealand
  *
@@ -28,10 +28,6 @@
 #endif
 
 #include <curl/curl.h>
-
-#ifdef MEGA_USE_C_ARES
-#include <ares.h>
-#endif
 
 namespace mega {
 
@@ -92,13 +88,11 @@ protected:
     CURLM* curlm[3];
 
     CURLSH* curlsh;
-#ifdef MEGA_USE_C_ARES
-    ares_channel ares;
-#endif
     string proxyurl;
     string proxyscheme;
     string proxyhost;
     int proxyport;
+    int proxytype;
     string proxyip;
     string proxyusername;
     string proxypassword;
@@ -116,7 +110,7 @@ protected:
 
     static size_t read_data(void*, size_t, size_t, void*);
     static size_t write_data(void*, size_t, size_t, void*);
-    static size_t check_header(void*, size_t, size_t, void*);
+    static size_t check_header(const char*, size_t, size_t, void*);
     static int seek_data(void*, curl_off_t, int);
 
     static int socket_callback(CURL *e, curl_socket_t s, int what, void *userp, void *socketp, direction_t d);
@@ -142,20 +136,9 @@ protected:
 #endif
 #endif
 
-#ifdef MEGA_USE_C_ARES
-#if (defined(ANDROID) || defined(__ANDROID__)) && ARES_VERSION >= 0x010F00
-    static void initialize_android();
-#endif
-#endif
-
 #ifdef USE_OPENSSL
     static CURLcode ssl_ctx_function(CURL*, void*, void*);
     static int cert_verify_callback(X509_STORE_CTX*, void*);
-#endif
-
-#ifdef MEGA_USE_C_ARES
-    static void proxy_ready_callback(void*, int, int, struct hostent*);
-    static void ares_completed_callback(void*, int, int, struct hostent*);
 #endif
 
     static void send_request(CurlHttpContext*);
@@ -164,17 +147,17 @@ protected:
     static bool crackurl(const string*, string*, string*, int*);
     static int debug_callback(CURL*, curl_infotype, char*, size_t, void*);
     bool ipv6available();
-#ifdef MEGA_USE_C_ARES
-    void filterDNSservers();
-#endif
+    const char* pubkeyForUrl(const char* url) const;
 
+    const char* pubkeyForUrl(const std::string& url) const
+    {
+        return pubkeyForUrl(url.c_str());
+    }
     bool curlipv6;
     bool reset;
     bool statechange;
     bool dnsok;
-#ifdef MEGA_USE_C_ARES
     string dnsservers;
-#endif
     curl_slist* contenttypejson;
     curl_slist* contenttypebinary;
     WAIT_CLASS* waiter;
@@ -182,14 +165,7 @@ protected:
 
     typedef std::map<curl_socket_t, SockInfo> SockInfoMap;
 
-#ifdef MEGA_USE_C_ARES
-    void addaresevents(Waiter *waiter);
-    void closearesevents();
-    void processaresevents();
-    SockInfoMap aressockets;
-    m_time_t arestimeout;
-#endif
-    void addcurlevents(Waiter *waiter, direction_t d);
+    void addcurlevents(Waiter* eventWaiter, direction_t d);
     int checkevents(Waiter*) override;
     void closecurlevents(direction_t d);
     void processcurlevents(direction_t d);
@@ -215,10 +191,10 @@ public:
     void addevents(Waiter*, int) override;
 
     void setuseragent(string*) override;
-    void setproxy(Proxy*);
-#ifdef MEGA_USE_C_ARES
-    void setdnsservers(const char*);
-#endif
+    void setproxy(const Proxy&) override;
+    std::optional<Proxy> getproxy() const override;
+    // It returns false if curl does not have a DNS backend supporting custom DNS lists.
+    bool setdnsservers(const char*);
     void disconnect() override;
 
     // set max download speed
@@ -246,14 +222,9 @@ public:
 private:
     static int instanceCount;
     friend class MegaClient;
-    CodeCounter::ScopeStats countCurlHttpIOAddevents = { "curl-httpio-addevents" };
-    CodeCounter::ScopeStats countAddCurlEventsCode = { "curl-add-events" };
-    CodeCounter::ScopeStats countProcessCurlEventsCode = { "curl-process-events" };
-
-#ifdef MEGA_USE_C_ARES
-    CodeCounter::ScopeStats countAddAresEventsCode = { "ares-add-events" };
-    CodeCounter::ScopeStats countProcessAresEventsCode = { "ares-process-events" };
-#endif
+    CodeCounter::ScopeStats countCurlHttpIOAddevents = {"curl-httpio-addevents"};
+    CodeCounter::ScopeStats countAddCurlEventsCode = {"curl-add-events"};
+    CodeCounter::ScopeStats countProcessCurlEventsCode = {"curl-process-events"};
 };
 
 struct MEGA_API CurlHttpContext
@@ -275,9 +246,6 @@ struct MEGA_API CurlHttpContext
     string posturl;
     unsigned len;
     const char* data;
-#ifdef MEGA_USE_C_ARES
-    int ares_pending;
-#endif
 };
 
 struct MEGA_API CurlDNSEntry

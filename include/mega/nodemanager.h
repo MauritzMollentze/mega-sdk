@@ -118,7 +118,7 @@ public:
     void byTag(const std::string& tag)
     {
         mTagFilter = escapeWildCards(tag);
-        mTagFilterContainsSeparator = mTagFilter.find(TAG_DELIMITER) != std::string::npos;
+        mTagFilterContainsSeparator = mTagFilter.getText().find(TAG_DELIMITER) != std::string::npos;
     }
 
     void useAndForTextQuery(const bool useAnd)
@@ -158,7 +158,11 @@ public:
     {
         return mDescriptionFilter.getText();
     }
-    const std::string& byTag() const { return mTagFilter; }
+
+    const std::string& byTag() const
+    {
+        return mTagFilter.getText();
+    }
 
     bool useAndForTextQuery() const
     {
@@ -197,7 +201,7 @@ public:
 
     bool hasTag() const
     {
-        return !mTagFilter.empty();
+        return !mTagFilter.getText().empty();
     }
 
     bool hasFav() const
@@ -208,6 +212,16 @@ public:
     bool hasSensitive() const
     {
         return mExcludeSensitive != BoolFilter::disabled;
+    }
+
+    void includeVersions(const bool includeVersions)
+    {
+        mIncludeVersions = includeVersions;
+    }
+
+    bool includeVersions() const
+    {
+        return mIncludeVersions;
     }
 
     bool isValidNodeType(const nodetype_t nodeType) const;
@@ -233,9 +247,10 @@ private:
     int64_t mModificationLowerLimit = 0;
     int64_t mModificationUpperLimit = 0;
     TextPattern mDescriptionFilter;
-    std::string mTagFilter;
+    TextPattern mTagFilter;
     bool mTagFilterContainsSeparator{false};
     bool mUseAndForTextQuery{true};
+    bool mIncludeVersions{false};
 
     static bool isDocType(const MimeType_t t);
 };
@@ -284,7 +299,9 @@ public:
     std::shared_ptr<Node> getNodeByHandle(NodeHandle handle);
 
     // read children from DB and load them in memory
-    sharedNode_list getChildren(const Node *parent, CancelToken cancelToken = CancelToken());
+    sharedNode_list getChildren(const Node* parent,
+                                CancelToken cancelToken = CancelToken(),
+                                bool includeVersions = false);
 
     sharedNode_vector getChildren(const NodeSearchFilter& filter, int order, CancelToken cancelFlag, const NodeSearchPage& page);
 
@@ -296,9 +313,30 @@ public:
 
     sharedNode_vector searchNodes(const NodeSearchFilter& filter, int order, CancelToken cancelFlag, const NodeSearchPage& page);
 
-    std::set<std::string> getAllNodeTags(const char* searchString, CancelToken cancelFlag);
+    /*
+     * @brief
+     * Get all node tags below a specified node.
+     *
+     * @param cancelToken
+     * A token that can be used to terminate the query's execution prematurely.
+     *
+     * @param handles
+     * A set of handles specifying which nodes we want to list tags below.
+     *
+     * If undefined, the query will list tags below all root nodes.
+     *
+     * @param pattern
+     * An optional pattern that can be used to filter which tags we list.
+     *
+     * @returns
+     * std::nullopt on failure.
+     * std::set<std::string> on success.
+     */
+    auto getNodeTagsBelow(CancelToken cancelToken,
+                          const std::set<NodeHandle>& handles,
+                          const std::string& pattern = {}) -> std::optional<std::set<std::string>>;
 
-    sharedNode_vector getNodesByFingerprint(FileFingerprint& fingerprint);
+    sharedNode_vector getNodesByFingerprint(const FileFingerprint& fingerprint);
     sharedNode_vector getNodesByOrigFingerprint(const std::string& fingerprint, Node *parent);
     std::shared_ptr<Node> getNodeByFingerprint(FileFingerprint &fingerprint);
 
@@ -429,6 +467,16 @@ public:
     bool ready();
 
 private:
+    class NoKeyLogger
+    {
+    public:
+        void log(const Node& node) const;
+
+    private:
+        // How many no key nodes has been counted for logging
+        mutable std::atomic_int mCount{1};
+    };
+
     MegaClient& mClient;
 
 #if defined(DEBUG)
@@ -444,6 +492,9 @@ private:
     // interface to handle accesses to "nodes" table
     DBTableNodes* mTable = nullptr;
 
+    // logger with rate limitting for no key
+    static NoKeyLogger mNoKeyLogger;
+
     // root nodes (files, vault, rubbish)
     struct Rootnodes
     {
@@ -452,6 +503,9 @@ private:
         NodeHandle rubbish;
         std::map<nodetype_t, std::shared_ptr<Node> > mRootNodes;
 
+        // minimum expected number of root nodes (min num of root nodes may vary depending on
+        // client type i.e password manager)
+        static constexpr uint8_t MIN_NUM_ROOT_NODES{3};
         // returns true if the 'h' provided matches any of the rootnodes.
         // (when logged into folder links, the handle of the folder is set to 'files')
         bool isRootNode(NodeHandle h) const { return (h == files || h == vault || h == rubbish); }
@@ -527,8 +581,6 @@ private:
     sharedNode_vector getChildren_internal(const NodeSearchFilter& filter, int order, CancelToken cancelFlag, const NodeSearchPage& page);
     sharedNode_vector getRecentNodes_internal(const NodeSearchPage& page, m_time_t since);
 
-    std::set<std::string> getAllNodeTags_internal(const char* searchString, CancelToken cancelFlag);
-
     // node temporary in memory, which will be removed upon write to DB
     std::shared_ptr<Node> mNodeToWriteInDb;
 
@@ -537,6 +589,9 @@ private:
 
     // true when the NodeManager has been inicialized and contains a valid filesystem
     bool mInitialized = false;
+
+    // flag that determines if null root nodes error has already been reported
+    bool mNullRootNodesReported{false};
 
     // These are all the "internal" versions of the public interfaces.
     // This is to avoid confusion where public functions used to call other public functions
@@ -552,11 +607,19 @@ private:
     bool addNode_internal(std::shared_ptr<Node> node, bool notify, bool isFetching, MissingParentNodes& missingParentNodes);
     bool updateNode_internal(Node* node);
 
+    /**
+     * @brief Manages null root nodes error server event (just once in NodeManager lifetime)
+     * This method sends an event to stats server and prints a log error to inform about this
+     * scenario.
+     */
+    void reportNullRootNodes(const size_t rootNodesSize);
+
     std::shared_ptr<Node> getNodeByHandle_internal(NodeHandle handle);
     sharedNode_list getChildren_internal(const Node* parent,
-                                         CancelToken cancelToken = CancelToken());
+                                         CancelToken cancelToken = CancelToken(),
+                                         bool includeVersions = false);
 
-    sharedNode_vector getNodesByFingerprint_internal(FileFingerprint& fingerprint);
+    sharedNode_vector getNodesByFingerprint_internal(const FileFingerprint& fingerprint);
     sharedNode_vector getNodesByOrigFingerprint_internal(const std::string& fingerprint, Node *parent);
     std::shared_ptr<Node> getNodeByFingerprint_internal(FileFingerprint &fingerprint);
     std::shared_ptr<Node> childNodeByNameType_internal(const Node *parent, const std::string& name, nodetype_t nodeType);

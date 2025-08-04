@@ -26,6 +26,9 @@
 #include "logging.h"
 #include "node.h"
 
+#include <filesystem>
+#include <optional>
+
 namespace mega {
 // generic host transactional database access interface
 class DBTableTransactionCommitter;
@@ -44,6 +47,7 @@ enum class DBError
     DB_ERROR_FULL = 1,
     DB_ERROR_IO = 2,
     DB_ERROR_INDEX_OVERFLOW = 3,
+    DB_ERROR_CORRUPT = 4,
 };
 
 using DBErrorCallback = std::function<void(DBError)>;
@@ -97,16 +101,13 @@ public:
     // permanantly remove all database info
     virtual void remove() = 0;
 
-    // whether an unmatched begin() has been issued
-    virtual bool inTransaction() const = 0;
-
     void checkCommitter(DBTableTransactionCommitter*);
 
     // autoincrement
     uint32_t nextid;
 
     DbTable(PrnGen &rng, bool alwaysTransacted, DBErrorCallback dBErrorCallBack);
-    virtual ~DbTable() { }
+    virtual ~DbTable() = default;
     DBTableTransactionCommitter *getTransactionCommitter() const;
 };
 
@@ -135,18 +136,32 @@ public:
     virtual bool searchNodes(const NodeSearchFilter& filter, int order, std::vector<std::pair<NodeHandle, NodeSerialized>>& nodes, CancelToken cancelFlag, const NodeSearchPage& page) = 0;
 
     /**
-     * @brief Retrieves all the different tags for all the nodes stored in the db and inserts them
-     * into the tags parameter.
+     * @brief
+     * Returns a set of all distinct tags below a set of specified parents.
      *
-     * @param searchString If not empty, only tags containing it will be returned. It can contain
-     * wild cards (*).
-     * @param tags Output parameter to store the tags.
-     * @param cancelFlag to cancel the processing at any time
-     * @return true if no errors were encountered, false otherwise.
+     * @param cancelToken
+     * A cancel token that can be used to abort the query.
+     *
+     * @param handle
+     * Handle specifing the node we should search for tags below.
+     *
+     * @param pattern
+     * A search pattern that can used to filter which tags are returned.
+     *
+     * An empty pattern specifies that there are no constraints as to what
+     * tags should be returned.
+     *
+     * A non-empty pattern specifies that only the tags matching that
+     * pattern should be returned. Wildcards are accepted.
+     *
+     * @return
+     * A set of tags if successful.
+     * nullopt if unsuccessful.
      */
-    virtual bool getAllNodeTags(const std::string& searchString,
-                                std::set<std::string>& tags,
-                                CancelToken cancelFlag) = 0;
+    virtual auto getNodeTagsBelow(CancelToken cancelToken,
+                                  NodeHandle handle,
+                                  const std::string& pattern)
+        -> std::optional<std::set<std::string>> = 0;
 
     virtual bool getRecentNodes(const NodeSearchPage& page,
                                 m_time_t since,
@@ -301,8 +316,15 @@ struct MEGA_API DbAccess
     // Check if the specified database exists on disk.
     virtual bool probe(FileSystemAccess& fsAccess, const string& name) const = 0;
 
+    virtual std::optional<std::filesystem::path>
+        getExistingDbPath(const FileSystemAccess& fsAccess, const std::string& fname) const = 0;
+
     // Where are we storing our databases?
     virtual const LocalPath& rootPath() const = 0;
+
+    virtual bool renameDBFiles(FileSystemAccess& fsAccess,
+                               const LocalPath& legacyPath,
+                               const LocalPath& dbPath) = 0;
 
     int currentDbVersion;
 };

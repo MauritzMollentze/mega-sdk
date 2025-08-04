@@ -98,19 +98,18 @@ bool UserAlertRaw::gethandletypearray(nameid nid, vector<handletype>& v) const
                 handletype ht;
                 ht.h = UNDEF;
                 ht.t = -1;
-                bool fields = true;
-                while (fields)
+                for (bool reading = true; reading;)
                 {
                     switch (j.getnameid())
                     {
-                    case 'h':
+                    case makeNameid("h"):
                         ht.h = j.gethandle(MegaClient::NODEHANDLE);
                         break;
-                    case 't':
+                    case makeNameid("t"):
                         ht.t = int(j.getint());
                         break;
                     case EOO:
-                        fields = false;
+                        reading = false;
                         break;
                     default:
                         j.storeobject(NULL);
@@ -175,9 +174,9 @@ UserAlert::Base::Base(UserAlertRaw& un, unsigned int cid)
 {
     id = cid;
     type = un.t;
-    m_time_t timeDelta = un.getint64(MAKENAMEID2('t', 'd'), 0);
+    m_time_t timeDelta = un.getint64(makeNameid("td"), 0);
     pst.timestamp = m_time() - timeDelta;
-    pst.userHandle = un.gethandle('u', MegaClient::USERHANDLE, UNDEF);
+    pst.userHandle = un.gethandle(name_id::u, MegaClient::USERHANDLE, UNDEF);
     pst.userEmail = un.getstring('m', "");
 
     tag = -1;
@@ -266,13 +265,18 @@ UserAlert::IncomingPendingContact::IncomingPendingContact(UserAlertRaw& un, unsi
     mPcrHandle = un.gethandle('p', MegaClient::PCRHANDLE, UNDEF);
     pst.userHandle = mPcrHandle;    // for backwards compatibility, due to legacy bug
 
-    m_time_t dts = un.getint64(MAKENAMEID3('d', 't', 's'), 0);
-    m_time_t rts = un.getint64(MAKENAMEID3('r', 't', 's'), 0);
+    m_time_t dts = un.getint64(makeNameid("dts"), 0);
+    m_time_t rts = un.getint64(makeNameid("rts"), 0);
     initTs(dts, rts);
 }
 
-UserAlert::IncomingPendingContact::IncomingPendingContact(m_time_t dts, m_time_t rts, handle p, const string& email, m_time_t timestamp, unsigned int id)
-    : Base(UserAlert::type_ipc, p, email, timestamp, id)
+UserAlert::IncomingPendingContact::IncomingPendingContact(m_time_t dts,
+                                                          m_time_t rts,
+                                                          handle p,
+                                                          const string& email,
+                                                          m_time_t timestamp,
+                                                          unsigned int id):
+    Base(name_id::ipc, p, email, timestamp, id)
     // passing PCR's handle as the user's handle for backwards compatibility, due to legacy bug
 {
     mPcrHandle = p;
@@ -353,13 +357,17 @@ UserAlert::IncomingPendingContact* UserAlert::IncomingPendingContact::unserializ
 UserAlert::ContactChange::ContactChange(UserAlertRaw& un, unsigned int id)
     : Base(un, id)
 {
-    action = un.getint('c', -1);
+    action = un.getint(name_id::c, -1);
     pst.relevant = action >= 0 && action < 4;
     assert(action >= 0 && action < 4);
 }
 
-UserAlert::ContactChange::ContactChange(int c, handle uh, const string& email, m_time_t timestamp, unsigned int id)
-    : Base(UserAlert::type_c, uh, email, timestamp, id)
+UserAlert::ContactChange::ContactChange(int c,
+                                        handle uh,
+                                        const string& email,
+                                        m_time_t timestamp,
+                                        unsigned int id):
+    Base(name_id::c, uh, email, timestamp, id)
 {
     action = c;
     assert(action >= 0 && action < 4);
@@ -397,7 +405,7 @@ bool UserAlert::ContactChange::serialize(string* d) const
 {
     Base::serialize(d);
     CacheableWriter w(*d);
-    w.serializeu32(action);
+    w.serializei32(action);
     w.serializeexpansionflags();
 
     return true;
@@ -434,11 +442,14 @@ UserAlert::UpdatedPendingContactIncoming::UpdatedPendingContactIncoming(UserAler
     pst.relevant = action >= 1 && action < 4;
 }
 
-UserAlert::UpdatedPendingContactIncoming::UpdatedPendingContactIncoming(int s, handle uh, const string& email, m_time_t timestamp, unsigned int id)
-    : Base(type_upci, uh, email, timestamp, id)
-    , action(s)
-{
-}
+UserAlert::UpdatedPendingContactIncoming::UpdatedPendingContactIncoming(int s,
+                                                                        handle uh,
+                                                                        const string& email,
+                                                                        m_time_t timestamp,
+                                                                        unsigned int id):
+    Base(name_id::upci, uh, email, timestamp, id),
+    action(s)
+{}
 
 void UserAlert::UpdatedPendingContactIncoming::text(string& header, string& title, MegaClient* mc)
 {
@@ -462,7 +473,7 @@ bool UserAlert::UpdatedPendingContactIncoming::serialize(string* d) const
 {
     Base::serialize(d);
     CacheableWriter w(*d);
-    w.serializeu32(action);
+    w.serializei32(action);
     w.serializeexpansionflags();
 
     return true;
@@ -499,11 +510,14 @@ UserAlert::UpdatedPendingContactOutgoing::UpdatedPendingContactOutgoing(UserAler
     pst.relevant = action == 2 || action == 3;
 }
 
-UserAlert::UpdatedPendingContactOutgoing::UpdatedPendingContactOutgoing(int s, handle uh, const string& email, m_time_t timestamp, unsigned int id)
-    : Base(type_upco, uh, email, timestamp, id)
-    , action(s)
-{
-}
+UserAlert::UpdatedPendingContactOutgoing::UpdatedPendingContactOutgoing(int s,
+                                                                        handle uh,
+                                                                        const string& email,
+                                                                        m_time_t timestamp,
+                                                                        unsigned int id):
+    Base(name_id::upco, uh, email, timestamp, id),
+    action(s)
+{}
 
 void UserAlert::UpdatedPendingContactOutgoing::text(string& header, string& title, MegaClient* mc)
 {
@@ -523,7 +537,7 @@ bool UserAlert::UpdatedPendingContactOutgoing::serialize(string* d) const
 {
     Base::serialize(d);
     CacheableWriter w(*d);
-    w.serializeu32(action);
+    w.serializei32(action);
     w.serializeexpansionflags();
 
     return true;
@@ -559,8 +573,12 @@ UserAlert::NewShare::NewShare(UserAlertRaw& un, unsigned int id)
     folderhandle = un.gethandle('n', MegaClient::NODEHANDLE, UNDEF);
 }
 
-UserAlert::NewShare::NewShare(handle h, handle uh, const string& email, m_time_t timestamp, unsigned int id)
-    : Base(type_share, uh, email, timestamp, id)
+UserAlert::NewShare::NewShare(handle h,
+                              handle uh,
+                              const string& email,
+                              m_time_t timestamp,
+                              unsigned int id):
+    Base(name_id::share, uh, email, timestamp, id)
 {
     folderhandle = h;
 }
@@ -620,8 +638,13 @@ UserAlert::DeletedShare::DeletedShare(UserAlertRaw& un, unsigned int id)
     folderHandle = un.gethandle('n', MegaClient::NODEHANDLE, UNDEF);
 }
 
-UserAlert::DeletedShare::DeletedShare(handle uh, const string& email, handle ownerhandle, handle folderhandle, m_time_t ts, unsigned int id)
-    : Base(type_dshare, uh, email, ts, id)
+UserAlert::DeletedShare::DeletedShare(handle uh,
+                                      const string& email,
+                                      handle ownerhandle,
+                                      handle folderhandle,
+                                      m_time_t ts,
+                                      unsigned int id):
+    Base(name_id::dshare, uh, email, ts, id)
 {
     ownerHandle = ownerhandle;
     folderHandle = folderhandle;
@@ -735,10 +758,16 @@ UserAlert::NewSharedNodes::NewSharedNodes(UserAlertRaw& un, unsigned int id)
     }
 }
 
-UserAlert::NewSharedNodes::NewSharedNodes(handle uh, handle ph, m_time_t timestamp, unsigned int id,
-                                          vector<handle>&& fileHandles, vector<handle>&& folderHandles)
-    : Base(UserAlert::type_put, uh, string(), timestamp, id)
-    , parentHandle(ph), fileNodeHandles(std::move(fileHandles)), folderNodeHandles(std::move(folderHandles))
+UserAlert::NewSharedNodes::NewSharedNodes(handle uh,
+                                          handle ph,
+                                          m_time_t timestamp,
+                                          unsigned int id,
+                                          vector<handle>&& fileHandles,
+                                          vector<handle>&& folderHandles):
+    Base(name_id::put, uh, string(), timestamp, id),
+    parentHandle(ph),
+    fileNodeHandles(std::move(fileHandles)),
+    folderNodeHandles(std::move(folderHandles))
 {
     assert(!ISUNDEF(uh));
 }
@@ -832,7 +861,7 @@ UserAlert::NewSharedNodes* UserAlert::NewSharedNodes::unserialize(string* d, uns
         uint64_t n = 0;
         if (r.unserializecompressedu64(n))
         {
-            vector<handle> vh1(n, 0);
+            vector<handle> vh1(static_cast<size_t>(n), 0);
             if (n)
             {
                 for (auto& h1 : vh1)
@@ -847,7 +876,7 @@ UserAlert::NewSharedNodes* UserAlert::NewSharedNodes::unserialize(string* d, uns
             n = 0;
             if (r.unserializecompressedu64(n))
             {
-                vector<handle> vh2(n, 0);
+                vector<handle> vh2(static_cast<size_t>(n), 0);
                 if (n)
                 {
                     for (auto& h2 : vh2)
@@ -888,11 +917,13 @@ UserAlert::RemovedSharedNode::RemovedSharedNode(UserAlertRaw& un, unsigned int i
     }
 }
 
-UserAlert::RemovedSharedNode::RemovedSharedNode(handle uh, m_time_t timestamp, unsigned int id,
-                                                vector<handle>&& handles)
-    : Base(UserAlert::type_d, uh, string(), timestamp, id), nodeHandles(std::move(handles))
-{
-}
+UserAlert::RemovedSharedNode::RemovedSharedNode(handle uh,
+                                                m_time_t timestamp,
+                                                unsigned int id,
+                                                vector<handle>&& handles):
+    Base(name_id::d, uh, string(), timestamp, id),
+    nodeHandles(std::move(handles))
+{}
 
 void UserAlert::RemovedSharedNode::text(string& header, string& title, MegaClient* mc)
 {
@@ -939,7 +970,7 @@ UserAlert::RemovedSharedNode* UserAlert::RemovedSharedNode::unserialize(string* 
     CacheableReader r(*d);
     if (r.unserializecompressedu64(n))
     {
-        vector<handle> vh(n, 0);
+        vector<handle> vh(static_cast<size_t>(n), 0);
         if (n)
         {
             for (auto& h : vh)
@@ -978,11 +1009,13 @@ UserAlert::UpdatedSharedNode::UpdatedSharedNode(UserAlertRaw& un, unsigned int i
     }
 }
 
-UserAlert::UpdatedSharedNode::UpdatedSharedNode(handle uh, m_time_t timestamp, unsigned int id,
-                                                vector<handle>&& handles)
-    : Base(UserAlert::type_u, uh, string(), timestamp, id), nodeHandles(std::move(handles))
-{
-}
+UserAlert::UpdatedSharedNode::UpdatedSharedNode(handle uh,
+                                                m_time_t timestamp,
+                                                unsigned int id,
+                                                vector<handle>&& handles):
+    Base(name_id::u, uh, string(), timestamp, id),
+    nodeHandles(std::move(handles))
+{}
 
 void UserAlert::UpdatedSharedNode::text(string& header, string& title, MegaClient* mc)
 {
@@ -1022,7 +1055,7 @@ UserAlert::UpdatedSharedNode* UserAlert::UpdatedSharedNode::unserialize(string* 
     CacheableReader r(*d);
     if (r.unserializecompressedu64(n))
     {
-        vector<handle> vh(n, 0);
+        vector<handle> vh(static_cast<size_t>(n), 0);
         if (n)
         {
             for (auto& h : vh)
@@ -1111,7 +1144,7 @@ bool UserAlert::Payment::serialize(string* d) const
     Base::serialize(d);
     CacheableWriter w(*d);
     w.serializebool(success);
-    w.serializeu32(planNumber);
+    w.serializei32(planNumber);
     w.serializeexpansionflags();
 
     return true;
@@ -1146,11 +1179,11 @@ UserAlert::Payment* UserAlert::Payment::unserialize(string* d, unsigned id, name
 UserAlert::PaymentReminder::PaymentReminder(UserAlertRaw& un, unsigned int id)
     : Base(un, id)
 {
-    expiryTime = un.getint64(MAKENAMEID2('t', 's'), ts());
+    expiryTime = un.getint64(makeNameid("ts"), ts());
 }
 
-UserAlert::PaymentReminder::PaymentReminder(m_time_t expiryts, unsigned int id)
-    : Base(type_pses, UNDEF, "", m_time(), id)
+UserAlert::PaymentReminder::PaymentReminder(m_time_t expiryts, unsigned int id):
+    Base(name_id::pses, UNDEF, "", m_time(), id)
 {
     expiryTime = expiryts;
 }
@@ -1211,15 +1244,20 @@ UserAlert::PaymentReminder* UserAlert::PaymentReminder::unserialize(string* d, u
 UserAlert::Takedown::Takedown(UserAlertRaw& un, unsigned int id)
     : Base(un, id)
 {
-    int n = un.getint(MAKENAMEID4('d', 'o', 'w', 'n'), -1);
+    int n = un.getint(makeNameid("down"), -1);
     isTakedown = n == 1;
     isReinstate = n == 0;
     nodeHandle = un.gethandle('h', MegaClient::NODEHANDLE, UNDEF);
     pst.relevant = isTakedown || isReinstate;
 }
 
-UserAlert::Takedown::Takedown(bool down, bool reinstate, int /*t*/, handle nh, m_time_t timestamp, unsigned int id)
-    : Base(type_ph, UNDEF, "", timestamp, id)
+UserAlert::Takedown::Takedown(bool down,
+                              bool reinstate,
+                              int /*t*/,
+                              handle nh,
+                              m_time_t timestamp,
+                              unsigned int id):
+    Base(name_id::ph, UNDEF, "", timestamp, id)
 {
     isTakedown = down;
     isReinstate = reinstate;
@@ -1310,11 +1348,114 @@ UserAlert::Takedown* UserAlert::Takedown::unserialize(string* d, unsigned id)
     return nullptr;
 }
 
+UserAlert::SetTakedown::SetTakedown(UserAlertRaw& un, unsigned int id):
+    Base(un, id)
+{
+    int n = un.getint(MAKENAMEID2('t', 'd'), -1);
+    isTakedown = n == 1;
+    isReinstate = n == 0;
+    reason = PublicLinkSet::apiCodeToDeletionReason(un.getint(MAKENAMEID1('c'), 0));
+    setId = un.gethandle('s', MegaClient::SETHANDLE, UNDEF);
+    pst.relevant = isTakedown || isReinstate;
+}
+
+UserAlert::SetTakedown::SetTakedown(bool down,
+                                    bool reinstate,
+                                    PublicLinkSet::LinkDeletionReason downReason,
+                                    handle sId,
+                                    m_time_t timestamp,
+                                    unsigned int id):
+    Base(name_id::ass, UNDEF, "", timestamp, id),
+    isTakedown{down},
+    isReinstate{reinstate},
+    reason{downReason},
+    setId{sId}
+{
+    pst.relevant = isTakedown || isReinstate;
+}
+
+void UserAlert::SetTakedown::text(string& header, string& title, MegaClient* mc)
+{
+    updateEmail(mc);
+    const std::string name = std::invoke(
+        [this, &mc]() -> std::string
+        {
+            const Set* set = mc->getSet(setId);
+            if (set)
+            {
+                return set->name();
+            }
+
+            char buffer[12];
+            Base64::btoa((byte*)&(setId), MegaClient::SETHANDLE, buffer);
+            return std::string("set id ") + buffer;
+        });
+
+    ostringstream s;
+    if (isTakedown)
+    {
+        header = "Takedown notice";
+        s << "Your publicly shared set (" << name << ") has been taken down due to reason: "
+          << PublicLinkSet::LinkDeletionReasonToString(reason) << ".";
+    }
+    else if (isReinstate)
+    {
+        header = "Takedown reinstated";
+        s << "Your taken down set (" << name << ") has been reinstated.";
+    }
+    title = s.str();
+}
+
+bool UserAlert::SetTakedown::serialize(string* d) const
+{
+    Base::serialize(d);
+    CacheableWriter w(*d);
+    w.serializebool(isTakedown);
+    w.serializebool(isReinstate);
+    w.serializeu8(static_cast<uint8_t>(reason));
+    w.serializehandle(setId);
+    w.serializeexpansionflags();
+
+    return true;
+}
+
+UserAlert::SetTakedown* UserAlert::SetTakedown::unserialize(string* d, unsigned id)
+{
+    auto p = Base::unserialize(d);
+    if (!p)
+    {
+        return nullptr;
+    }
+
+    bool takedown = false;
+    bool reinstate = false;
+    uint8_t reasonId = 0;
+    handle setId = UNDEF;
+    unsigned char expF[8];
+
+    CacheableReader r(*d);
+    if (r.unserializebool(takedown) && r.unserializebool(reinstate) && r.unserializeu8(reasonId) &&
+        r.unserializehandle(setId) && r.unserializeexpansionflags(expF, 0))
+    {
+        auto* td = new SetTakedown(takedown,
+                                   reinstate,
+                                   static_cast<PublicLinkSet::LinkDeletionReason>(reasonId),
+                                   setId,
+                                   p->timestamp,
+                                   id);
+        td->setRelevant(p->relevant);
+        td->setSeen(p->seen);
+        return td;
+    }
+
+    return nullptr;
+}
+
 #ifdef ENABLE_CHAT
 UserAlert::NewScheduledMeeting::NewScheduledMeeting(UserAlertRaw& un, unsigned int id)
     : Base(un, id)
 {
-    mChatid = un.gethandle(MAKENAMEID3('c', 'i', 'd'), MegaClient::CHATHANDLE, UNDEF);
+    mChatid = un.gethandle(makeNameid("cid"), MegaClient::CHATHANDLE, UNDEF);
     if (mChatid == UNDEF)
     {
         assert(false);
@@ -1322,7 +1463,7 @@ UserAlert::NewScheduledMeeting::NewScheduledMeeting(UserAlertRaw& un, unsigned i
         return;
     }
 
-    mSchedMeetingHandle = un.gethandle(MAKENAMEID2('i', 'd'), MegaClient::CHATHANDLE, UNDEF);
+    mSchedMeetingHandle = un.gethandle(makeNameid("id"), MegaClient::CHATHANDLE, UNDEF);
     if (mSchedMeetingHandle == UNDEF)
     {
         assert(false);
@@ -1331,10 +1472,10 @@ UserAlert::NewScheduledMeeting::NewScheduledMeeting(UserAlertRaw& un, unsigned i
     }
 
     // optional param parent scheduled meeting id (just for child scheduled meetings)
-    mParentSchedId = un.gethandle(MAKENAMEID1('p'), MegaClient::USERHANDLE, UNDEF);
+    mParentSchedId = un.gethandle(makeNameid("p"), MegaClient::USERHANDLE, UNDEF);
 
     // optional param start date time (just for child scheduled meetings)
-    mStartDateTime = un.getint64(MAKENAMEID1('o'), mega_invalid_timestamp);
+    mStartDateTime = un.getint64(makeNameid("o"), mega_invalid_timestamp);
 }
 
 void UserAlert::NewScheduledMeeting::text(string& header, string& title, MegaClient* mc)
@@ -1441,8 +1582,8 @@ UserAlert::NewScheduledMeeting* UserAlert::NewScheduledMeeting::unserialize(stri
 UserAlert::DeletedScheduledMeeting::DeletedScheduledMeeting(UserAlertRaw& un, unsigned int id)
     : Base(un, id)
 {
-    mChatid = un.gethandle(MAKENAMEID3('c', 'i', 'd'), MegaClient::CHATHANDLE, UNDEF);
-    mSchedMeetingHandle = un.gethandle(MAKENAMEID2('i', 'd'), MegaClient::CHATHANDLE, UNDEF);
+    mChatid = un.gethandle(makeNameid("cid"), MegaClient::CHATHANDLE, UNDEF);
+    mSchedMeetingHandle = un.gethandle(makeNameid("id"), MegaClient::CHATHANDLE, UNDEF);
     if (mChatid == UNDEF)
     {
         assert(false);
@@ -1510,8 +1651,8 @@ UserAlert::DeletedScheduledMeeting* UserAlert::DeletedScheduledMeeting::unserial
 UserAlert::UpdatedScheduledMeeting::UpdatedScheduledMeeting(UserAlertRaw& un, unsigned int id)
     : Base(un, id)
 {
-    mChatid = un.gethandle(MAKENAMEID3('c', 'i', 'd'), MegaClient::CHATHANDLE, UNDEF);
-    mSchedMeetingHandle = un.gethandle(MAKENAMEID2('i', 'd'), MegaClient::CHATHANDLE, UNDEF);
+    mChatid = un.gethandle(makeNameid("cid"), MegaClient::CHATHANDLE, UNDEF);
+    mSchedMeetingHandle = un.gethandle(makeNameid("id"), MegaClient::CHATHANDLE, UNDEF);
     if (mChatid == UNDEF)
     {
         assert(false);
@@ -1526,7 +1667,7 @@ UserAlert::UpdatedScheduledMeeting::UpdatedScheduledMeeting(UserAlertRaw& un, un
         return;
     }
 
-    JSON auxJson = un.field(MAKENAMEID2('c', 's'));
+    JSON auxJson = un.field(makeNameid("cs"));
     if (auxJson.pos)
     {
         if (auxJson.enterobject())
@@ -1547,10 +1688,10 @@ UserAlert::UpdatedScheduledMeeting::UpdatedScheduledMeeting(UserAlertRaw& un, un
     }
 
     // optional param parent scheduled meeting id (just for child scheduled meetings)
-    mParentSchedId = un.gethandle(MAKENAMEID1('p'), MegaClient::USERHANDLE, UNDEF);
+    mParentSchedId = un.gethandle(makeNameid("p"), MegaClient::USERHANDLE, UNDEF);
 
     // optional param start date time (just for child scheduled meetings)
-    mStartDateTime = un.getint64(MAKENAMEID1('o'), mega_invalid_timestamp);
+    mStartDateTime = un.getint64(makeNameid("o"), mega_invalid_timestamp);
 }
 
 void UserAlert::UpdatedScheduledMeeting::text(string& header, string& title, MegaClient* mc)
@@ -1827,40 +1968,41 @@ bool UserAlerts::isUnwantedAlert(nameid type, int action)
 {
     using namespace UserAlert;
 
-    if (type == type_put || type == type_share || type == type_dshare)
+    if (type == name_id::put || type == name_id::share || type == name_id::dshare)
     {
         if (!flags.cloud_enabled) {
             return true;
         }
     }
-    else if (type == type_c || type == type_ipc || type == type_upci || type == type_upco)
+    else if (type == name_id::c || type == name_id::ipc || type == name_id::upci ||
+             type == name_id::upco)
     {
         if (!flags.contacts_enabled) {
             return true;
         }
     }
 
-    if (type == type_put)
+    if (type == name_id::put)
     {
         return !flags.cloud_newfiles;
     }
-    else if (type == type_share)
+    else if (type == name_id::share)
     {
         return !flags.cloud_newshare;
     }
-    else if (type == type_dshare)
+    else if (type == name_id::dshare)
     {
         return !flags.cloud_delshare;
     }
-    else if (type == type_ipc)
+    else if (type == name_id::ipc)
     {
         return !flags.contacts_fcrin;
     }
-    else if (type == type_c)
+    else if (type == name_id::c)
     {
         return (action == -1 || action == 0) && !flags.contacts_fcrdel;
     }
-    else if (type == type_upco)
+    else if (type == name_id::upco)
     {
         return (action == -1 || action == 2) && !flags.contacts_fcracpt;
     }
@@ -1875,47 +2017,50 @@ void UserAlerts::add(UserAlertRaw& un)
     Base* unb = NULL;
 
     switch (un.t) {
-    case type_ipc:
+    case name_id::ipc:
         unb = new IncomingPendingContact(un, nextId());
         break;
-    case type_c:
+    case name_id::c:
         unb = new ContactChange(un, nextId());
         break;
-    case type_upci:
+    case name_id::upci:
         unb = new UpdatedPendingContactIncoming(un, nextId());
         break;
-    case type_upco:
+    case name_id::upco:
         unb = new UpdatedPendingContactOutgoing(un, nextId());
         break;
-    case type_share:
+    case name_id::share:
         unb = new u::NewShare(un, nextId());
         break;
-    case type_dshare:
+    case name_id::dshare:
         unb = new DeletedShare(un, nextId());
         break;
-    case type_put:
+    case name_id::put:
         unb = new NewSharedNodes(un, nextId());
         break;
-    case type_d:
+    case name_id::d:
         unb = new RemovedSharedNode(un, nextId());
         break;
-    case type_u:
+    case name_id::u:
         unb = new UpdatedSharedNode(un, nextId());
         break;
-    case type_psts:
-    case type_psts_v2:
+    case name_id::psts:
+    case name_id::psts_v2:
         unb = new Payment(un, nextId());
         break;
-    case type_pses:
+    case name_id::pses:
         unb = new PaymentReminder(un, nextId());
         break;
-    case type_ph:
+    case name_id::ph:
         unb = new Takedown(un, nextId());
         break;
+    case name_id::ass:
+        unb = new SetTakedown(un, nextId());
+        break;
 #ifdef ENABLE_CHAT
-    case type_nusm:
+    case name_id::mcsmp:
     {
-        if (!un.has(MAKENAMEID2('c', 's'))) // if cs is not present, is a new scheduled meeting
+        if (!un.has(makeNameid("cs"))) // if cs is not present, is a new scheduled meeting
         {
             unb = new NewScheduledMeeting(un, nextId());
         }
@@ -1925,7 +2070,7 @@ void UserAlerts::add(UserAlertRaw& un)
         }
     }
     break;
-    case type_dsm:
+    case name_id::mcsmr:
         unb = new DeletedScheduledMeeting(un, nextId());
         break;
 #endif
@@ -1977,7 +2122,7 @@ void UserAlerts::add(UserAlert::Base* unb)
     }
 
     // attempt to combine with previous NewSharedNodes
-    UserAlert::Base* cmb = findAlertToCombineWith(unb, UserAlert::type_put);
+    UserAlert::Base* cmb = findAlertToCombineWith(unb, name_id::put);
     if (cmb)
     {
         // If it's file/folders added, and the prior one is for the same user and within 5 mins then we can combine instead
@@ -2002,7 +2147,7 @@ void UserAlerts::add(UserAlert::Base* unb)
     }
 
     // attempt to combine with previous RemovedSharedNode
-    cmb = findAlertToCombineWith(unb, UserAlert::type_d);
+    cmb = findAlertToCombineWith(unb, name_id::d);
     if (cmb)
     {
         // If it's file/folders removed, and the prior one is for the same user and within 5 mins then we can combine instead
@@ -2024,7 +2169,7 @@ void UserAlerts::add(UserAlert::Base* unb)
     }
 
     // attempt to combine with previous UpdatedSharedNode
-    cmb = findAlertToCombineWith(unb, UserAlert::type_u);
+    cmb = findAlertToCombineWith(unb, name_id::u);
     if (cmb)
     {
         // If it's file/folders updated, and the prior one is for the same user and within 5 mins then we can combine instead
@@ -2045,16 +2190,37 @@ void UserAlerts::add(UserAlert::Base* unb)
         }
     }
 
-    // check for previous Payment-Reminder to ignore
-    if (!alerts.empty() && (unb->type == UserAlert::type_psts || unb->type == UserAlert::type_psts_v2) && static_cast<UserAlert::Payment*>(unb)->success)
+    // check for previous Payment-Reminder-s to ignore
+    if (!alerts.empty() && (unb->type == name_id::psts || unb->type == name_id::psts_v2) &&
+        static_cast<UserAlert::Payment*>(unb)->success)
     {
         // if a successful payment is made then hide/remove any reminders received
-        for (auto& a : alerts)
+        for (auto& a: alerts)
         {
-            if (a->type == UserAlert::type_pses && a->relevant())
+            if (a->type == name_id::pses &&
+                static_cast<UserAlert::PaymentReminder*>(a)->expiryTime < unb->ts())
             {
                 a->setRelevant(false);
-                notifyAlert(a, a->seen(), a->tag);
+                a->setRemoved();
+                useralertnotify.erase(
+                    std::remove(useralertnotify.begin(), useralertnotify.end(), a),
+                    useralertnotify.end());
+            }
+        }
+    }
+
+    // check for previous Payment that would invalidate a Payment-Reminder
+    else if (!alerts.empty() && unb->type == name_id::pses)
+    {
+        // if a successful payment was made later, then ignore this reminder
+        for (auto& a: alerts)
+        {
+            if ((a->type == name_id::psts || a->type == name_id::psts_v2) &&
+                static_cast<UserAlert::Payment*>(a)->success &&
+                a->ts() > static_cast<UserAlert::PaymentReminder*>(unb)->expiryTime)
+            {
+                delete unb;
+                return;
             }
         }
     }
@@ -2101,7 +2267,7 @@ void UserAlerts::noteSharedNode(handle user, int type, m_time_t ts, Node* n, nam
     {
         assert(!ISUNDEF(user));
 
-        if (!ISUNDEF(ignoreNodesUnderShare) && (alertType != UserAlert::type_d))
+        if (!ISUNDEF(ignoreNodesUnderShare) && (alertType != name_id::d))
         {
             // don't make alerts on files/folders already in the new share
             for (Node* p = n; p != NULL; p = p->parent.get())
@@ -2258,13 +2424,13 @@ bool UserAlerts::isSharedNodeNotedAsRemovedFrom(handle nodeHandleToFind,
             const handletoalert_t& folderAlertTypes = element.second.alertTypePerFolderNode;
             auto itToFolderNodeHandleAndAlertType = folderAlertTypes.find(nodeHandleToFind);
 
-            bool isInFileNodes = ((itToFileNodeHandleAndAlertType != end(fileAlertTypes))
-                                  && (itToFileNodeHandleAndAlertType->second == UserAlert::type_d));
+            bool isInFileNodes = ((itToFileNodeHandleAndAlertType != end(fileAlertTypes)) &&
+                                  (itToFileNodeHandleAndAlertType->second == name_id::d));
 
             // shortcircuit in case it was already found
-            bool isInFolderNodes = isInFileNodes ||
-                ((itToFolderNodeHandleAndAlertType != end(folderAlertTypes))
-                  && (itToFolderNodeHandleAndAlertType->second == UserAlert::type_d));
+            bool isInFolderNodes =
+                isInFileNodes || ((itToFolderNodeHandleAndAlertType != end(folderAlertTypes)) &&
+                                  (itToFolderNodeHandleAndAlertType->second == name_id::d));
 
             return (isInFileNodes || isInFolderNodes);
         });
@@ -2513,7 +2679,7 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
     {
         switch (jsonsc.getnameid())
         {
-        case 'u':
+        case name_id::u:
             if (jsonsc.enterarray())
             {
                 for (;;)
@@ -2526,13 +2692,13 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
                         {
                             switch (jsonsc.getnameid())
                             {
-                            case 'u':
+                            case name_id::u:
                                 ul.u = jsonsc.gethandle(MegaClient::USERHANDLE);
                                 break;
-                            case 'm':
+                            case makeNameid("m"):
                                 jsonsc.storeobject(&ul.m);
                                 break;
-                            case MAKENAMEID2('m', '2'):
+                            case makeNameid("m2"):
                                 if (jsonsc.enterarray())
                                 {
                                     for (;;)
@@ -2550,7 +2716,7 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
                                     jsonsc.leavearray();
                                 }
                                 break;
-                            case 'n':
+                            case makeNameid("n"):
                                 jsonsc.storeobject(&ul.n);
                                 break;
                             case EOO:
@@ -2572,15 +2738,15 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
             }
             break;
 
-        case MAKENAMEID3('l', 's', 'n'):
+        case makeNameid("lsn"):
             lsn = jsonsc.gethandle(8);
             break;
 
-        case MAKENAMEID3('f', 's', 'n'):
+        case makeNameid("fsn"):
             fsn = jsonsc.gethandle(8);
             break;
 
-        case MAKENAMEID3('l', 't', 'd'):   // last notifcation seen time delta (or 0)
+        case makeNameid("ltd"): // last notifcation seen time delta (or 0)
             lastTimeDelta = jsonsc.getint();
             break;
 
@@ -2592,13 +2758,14 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
 
                 if (b->email().empty() && b->user() != UNDEF)
                 {
-                    map<handle, UserAlertPendingContact>::iterator i = pendingContactUsers.find(b->user());
-                    if (i != pendingContactUsers.end())
+                    map<handle, UserAlertPendingContact>::iterator itContact =
+                        pendingContactUsers.find(b->user());
+                    if (itContact != pendingContactUsers.end())
                     {
-                        b->setEmail(i->second.m);
-                        if (b->email().empty() && !i->second.m2.empty())
+                        b->setEmail(itContact->second.m);
+                        if (b->email().empty() && !itContact->second.m2.empty())
                         {
-                            b->setEmail(i->second.m2[0]);
+                            b->setEmail(itContact->second.m2[0]);
                         }
                     }
                 }
@@ -2608,7 +2775,7 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
             catchupdone = true;
             return true;
 
-        case 'c':  // notifications
+        case name_id::c: // notifications
             if (jsonsc.enterarray())
             {
                 for (;;)
@@ -2624,7 +2791,7 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
                             switch (nid)
                             {
 
-                            case 't':
+                            case makeNameid("t"):
                                 un.t = jsonsc.getnameid();
                                 break;
 
@@ -2639,7 +2806,7 @@ bool UserAlerts::procsc_useralert(JSON& jsonsc)
                             }
                         }
 
-                        if (!isUnwantedAlert(un.t, un.getint('c', -1)))
+                        if (!isUnwantedAlert(un.t, un.getint(name_id::c, -1)))
                         {
                             add(un);
                         }
@@ -2734,63 +2901,67 @@ bool UserAlerts::unserializeAlert(string* d, uint32_t dbid)
 
     switch (type)
     {
-    case UserAlert::type_ipc:
+    case name_id::ipc:
         a = UserAlert::IncomingPendingContact::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_c:
+    case name_id::c:
         a = UserAlert::ContactChange::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_upci:
+    case name_id::upci:
         a = UserAlert::UpdatedPendingContactIncoming::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_upco:
+    case name_id::upco:
         a = UserAlert::UpdatedPendingContactOutgoing::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_share:
+    case name_id::share:
         a = UserAlert::NewShare::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_dshare:
+    case name_id::dshare:
         a = UserAlert::DeletedShare::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_put:
+    case name_id::put:
         a = UserAlert::NewSharedNodes::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_d:
+    case name_id::d:
         a = UserAlert::RemovedSharedNode::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_u:
+    case name_id::u:
         a = UserAlert::UpdatedSharedNode::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_psts:
-    case UserAlert::type_psts_v2:
+    case name_id::psts:
+    case name_id::psts_v2:
         a = UserAlert::Payment::unserialize(d, nextId(), type);
         break;
 
-    case UserAlert::type_pses:
+    case name_id::pses:
         a = UserAlert::PaymentReminder::unserialize(d, nextId());
         break;
 
-    case UserAlert::type_ph:
+    case name_id::ph:
         a = UserAlert::Takedown::unserialize(d, nextId());
         break;
 
+    case name_id::ass:
+        a = UserAlert::SetTakedown::unserialize(d, nextId());
+        break;
+
 #ifdef ENABLE_CHAT
-    case UserAlert::type_nusm:
+    case name_id::mcsmp:
         // this method disambiguates between NewScheduledMeeting and UpdatedScheduledMeeting
         a = UserAlert::unserializeNewUpdSched(d, nextId());
         assert(a);
         break;
 
-    case UserAlert::type_dsm:
+    case name_id::mcsmr:
         a = UserAlert::DeletedScheduledMeeting::unserialize(d, nextId());
         break;
 #endif

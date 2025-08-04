@@ -58,7 +58,7 @@ void TreeProcDel::proc(MegaClient* client, std::shared_ptr<Node> n)
     client->mNodeManager.notifyNode(n);
     handle userHandle = ISUNDEF(mOriginatingUser) ? n->owner : mOriginatingUser;
 
-    if (userHandle != client->me)
+    if (userHandle != client->me && !client->loggedIntoFolder())
     {
         client->useralerts.noteSharedNode(userHandle, n->type, 0, n.get());
     }
@@ -158,7 +158,7 @@ void LocalTreeProcMove::proc(FileSystemAccess&, LocalNode* localnode)
     nc++;
 }
 
-void LocalTreeProcUpdateTransfers::proc(FileSystemAccess& fsa, LocalNode *localnode)
+void LocalTreeProcUpdateTransfers::proc(FileSystemAccess&, LocalNode* localnode)
 {
     // Only updating the localname thread safe field.
     // Transfers are managed from the megaclient thread

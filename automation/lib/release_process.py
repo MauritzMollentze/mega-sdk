@@ -29,13 +29,12 @@ class ReleaseProcess:
         self._project_name = project_name
         self._version_v_prefixed = ""
 
-    def setup_project_management(self, url: str, user: str, password: str):
+    def setup_project_management(self, url: str, token: str):
         assert self._jira is None
         print("Jira initializing", flush=True)
         self._jira = JiraProject(
             url,
-            user,
-            password,
+            token,
             self._project_name,
         )
         print("v Jira initialized", flush=True)
@@ -53,7 +52,8 @@ class ReleaseProcess:
         self,
         slack_token: str,
         slack_channel_dev: str,
-        slack_channel_announce: str,
+        slack_channel_announce: str = "",
+        slack_thread_announce: str = "",
     ):
         # Chat has 2 purposes:
         # - request approvals for MRs (always in the same channel, only for SDK devs);
@@ -62,6 +62,7 @@ class ReleaseProcess:
         self._slack = Slack(slack_token)
         self._slack_channel_dev_requests = slack_channel_dev
         self._slack_channel_announce = slack_channel_announce
+        self._slack_thread_announce = slack_thread_announce
         print("v Slack initialized", flush=True)
 
     # STEP 3: update version in local file
@@ -205,8 +206,44 @@ class ReleaseProcess:
         else:
             self._slack.post_message(
                 self._slack_channel_dev_requests,
+                "",
                 f"Hello <!channel>,\n\nPlease approve the MR for {reason}",
             )
+
+    def _filter_release_notes(self, raw_release_notes: str, included_tickets: list[str]):
+        # Regular expression to detect ticket lines and section lines
+        ticket_line_regex = re.compile(r"^• \[<[^|]+\|([A-Z]+-\d+)\>\]")
+        section_header_regex = re.compile(r"^(?!• )\S.*")
+
+        filtered_lines = []
+        current_section = []
+        section_has_content = False
+
+        for line in raw_release_notes.splitlines():
+            if section_header_regex.match(line):
+                # Process the previous section
+                if current_section and section_has_content:
+                    filtered_lines.extend(current_section)
+
+                current_section = [line]
+                section_has_content = False
+
+            elif ticket_line_regex.search(line):
+                ticket_match = ticket_line_regex.search(line)
+                if ticket_match and ticket_match.group(1) in included_tickets:
+                    current_section.append(line)
+                    section_has_content = True
+            else:
+                current_section.append(line)
+                if line.strip():
+                    section_has_content = True
+
+        # Append the last section if it has relevant content
+        if current_section and section_has_content:
+            filtered_lines.extend(current_section)
+
+        filtered_notes = "\n".join(filtered_lines)
+        return filtered_notes
 
     # STEP 4: Create "release/vX.Y.Z" branch
     def create_release_branch(self):
@@ -270,7 +307,7 @@ class ReleaseProcess:
         )
 
     # STEP 7: Update and rename previous NextRelease version; create new NextRelease version
-    def manage_versions(self, url: str, user: str, password: str, apps: str):
+    def manage_versions(self, apps: str):
         assert self._new_version is not None
         assert self._jira is not None
         self._jira.update_current_version(
@@ -281,19 +318,44 @@ class ReleaseProcess:
         self._jira.create_new_version()
 
     # STEP 8: Post release notes to Slack
-    def post_notes(self, apps: list[str]):
+    def post_notes(self, apps: list[str], releaseType: str, tickets: list[str] = None):
         print("Generating release notes...", flush=True)
         assert self._rc_tag is not None
         assert self._jira is not None
+        assert releaseType is not None
         tag_url = self._remote_private_repo.get_tag_url(self._rc_tag)
+        
+        if releaseType == "newRelease":
+            notes: str = (
+                f"\U0001F4E3 \U0001F4E3 *New {self._project_name} version  -->  `{self._rc_tag}`* (<{tag_url}|Link>)\n\n"
+            )
+        elif releaseType == "releaseCandidate":
+            notes: str = (
+                f"\U0001F4E3 \U0001F4E3 *New {self._project_name} version  -->  `{self._rc_tag}`* (<{tag_url}|Link>)\n"
+                f"\U000026A0 What's new in this candidate:\n\n"
+            )
+        elif releaseType == "patchRelease":
+            major, minor, micro = (int(n) for n in self._new_version.split("."))
+            previousVersion = f"{major}.{minor}.{micro - 1}"
+            notes: str = (
+                f"\U0001F4E3 \U0001F4E3 *New {self._project_name} version  -->  `{self._rc_tag}`* (<{tag_url}|Link>)\n"
+                f"\U000026A0 \U000026A0 Hotfix created from `{previousVersion}` not develop, please only use this if your app was affected by some of the fixed issues\n\n"
+            )
+        raw_notes = self._jira.get_release_notes_for_slack(apps)
 
-        notes: str = (
-            f"\U0001F4E3 \U0001F4E3 *New {self._project_name} version  -->  `{self._rc_tag}`* (<{tag_url}|Link>)\n\n"
-        ) + self._jira.get_release_notes_for_slack(apps)
+        if tickets:
+            filtered_notes = self._filter_release_notes(raw_notes, tickets)
+        else:
+            filtered_notes = raw_notes
+
+        notes += filtered_notes
+
         if not self._slack or not self._slack_channel_announce:
             print("Enjoy:\n\n" + notes, flush=True)
         else:
-            self._slack.post_message(self._slack_channel_announce, notes)
+            self._slack.post_message(
+                self._slack_channel_announce, self._slack_thread_announce, notes
+            )
             print(
                 f"v Posted release notes to #{self._slack_channel_announce}", flush=True
             )
@@ -333,20 +395,32 @@ class ReleaseProcess:
         assert self._jira is not None
         self._jira.setup_release(self._version_v_prefixed)
 
+    def get_release_type_to_close(self, public_branch: str):
+        assert self._jira is not None, "Init Jira connection first"
+        mr_id, _ = self._remote_private_repo._get_open_mr(
+            self._get_mr_title_for_release(),
+            self.get_new_release_branch(),
+            public_branch,
+        )
+        if mr_id == 0:
+            return "hotfix"
+
+        if self._jira.earlier_versions_are_closed():
+            return "new_release"
+
+        return "old_release"
+
     def confirm_all_earlier_versions_are_closed(self):
         # This could be implemented in multiple ways.
         # Relying on Jira looked fine as it's the last update done when closing a Release.
         assert self._jira is not None, "Init Jira connection first"
         self._jira.earlier_versions_are_closed()
 
-    def setup_wiki(self, url: str, user: str, password: str):
-        if url and user and password:
+    def setup_wiki(self, url: str, token: str):
+        if url and token:
             print("Confluence initializing", flush=True)
-            self._wiki = Confluence(url=url, username=user, password=password)
-            user_details = self._wiki.get_user_details_by_username(user)
-            if isinstance(user_details, dict):
-                self._user_key = user_details["userKey"]
-            print("v Confluence initialized", flush=True)
+            self._wiki = Confluence(url=url, token=token)
+            print("v Confluence configured", flush=True)
 
     # STEP 1 (close): GitLab: Create tag "vX.Y.Z" from last commit of branch "release/vX.Y.Z"
     def create_release_tag(self):
@@ -406,6 +480,22 @@ class ReleaseProcess:
             public_remote_name, self._version_v_prefixed
         )
 
+    # STEP 4 (close): local git: Push release branch (release/vX.Y.Z) to public remote (github)
+    def push_release_branch_to_public_repo(
+        self, private_remote_name: str, public_remote_name: str
+    ):
+        release_branch = self.get_new_release_branch()
+
+        # get hotfix branch locally, with latest changes
+        self._get_branch_locally(private_remote_name, release_branch)
+
+        # push stuff to public repo
+        assert self._local_repo is not None
+        self._local_repo.push_branch(public_remote_name, release_branch)
+        self._local_repo.push_branch(
+            public_remote_name, self._version_v_prefixed
+        )  # "vX.Y.Z" tag
+
     # STEP 5 (close): GitHub: Create release in public repo from new tag
     def create_release_in_public_repo(self, version: str):
         assert self._jira is not None
@@ -418,9 +508,9 @@ class ReleaseProcess:
         assert self._jira is not None, "Init Jira connection first"
         self._jira.update_version_close_release()
 
-    # STEP 7 (close): Confluence: Rotate own name to the end of the list of release captains
+    # STEP 7 (close): Confluence: Rotate the first name to the end of the list of release captains
     def move_release_captain_last(self, page_id: str):
-        if self._user_key is None:
+        if self._wiki is None:
             print("Wiki connection not available, rotate Release Captain yourself !")
             return
 
@@ -433,11 +523,10 @@ class ReleaseProcess:
 
         # move current user last
         re_pattern = (
-            "<h[1-6]>Release Captain schedule</h[1-6]>.*"
-            "<ol(\\s.*?)?>"
-            "(<li>.*?</li>)*"
-            '(<li><ac:link><ri:user ri:userkey="' + self._user_key + '" />.*?</li>)'
-            ".*(</ol>)"
+            "<h[1-6]>Release Captain schedule</h[1-6]>.*?"
+            "<ol(\\s.*?)?>"  # Opening tag
+            "(<li>.*?</li>)"  # Match first item in the list. Current captain
+            ".*?(</ol>)"  # Skip the rest of the list and matches closing tag.
         )
         match = re.search(re_pattern, content)
         if match is None:
@@ -446,14 +535,15 @@ class ReleaseProcess:
             )
             return
 
-        my_user_start = match.start(3)
-        my_user_end = match.end(3)
-        list_end_tag_start = match.start(4)
+        completeMatch = match.group(0)
+        captain = match.group(2)
+        closingTag = match.group(3)
+
         new_content = (
-            content[:my_user_start]
-            + content[my_user_end:list_end_tag_start]
-            + content[my_user_start:my_user_end]
-            + content[list_end_tag_start:]
+            content[: match.start(0)]
+            + completeMatch.replace(captain, "").replace(closingTag, captain)
+            + closingTag
+            + content[match.end(0) :]
         )
         self._wiki.update_page(page_id, page["title"], new_content)
         print("v Release Captain rotated")
@@ -494,6 +584,7 @@ class ReleaseProcess:
         assert self._jira
         assert self._version_v_prefixed
         self._jira.create_new_version_for_patch(self._version_v_prefixed, for_apps)
+        self._jira.setup_release(self._version_v_prefixed)
 
     def add_fix_version_to_tickets(self, tickets: list[str]):
         assert self._jira
@@ -526,76 +617,16 @@ class ReleaseProcess:
     def set_release_version_for_new_rc(self, version: str):
         assert not self._new_version
         assert self._jira is not None
+        self._new_version = version
+        self._version_v_prefixed = f"v{self._new_version}"
+        print(f"Version v prefixed is {self._version_v_prefixed}")
         self._jira.setup_release(self._version_v_prefixed)
         [exists, was_released, app_descr] = self._jira.get_version_info(version)
         assert exists, f"Could not find version {version}, for a new RC"
         assert not was_released, "Cannot make a new RC for a released version"
-
-        self._new_version = version
-        self._version_v_prefixed = f"v{self._new_version}"
-
         return app_descr
 
-    def create_branch_from_last_rc(self, remote_name: str, branch_name: str) -> int:
+    def get_last_rc(self):
         rc = self._remote_private_repo.get_last_rc(self._version_v_prefixed)
         assert rc, f"No RC found for version {self._new_version}"
-
-        print("Creating branch", branch_name, flush=True)
-        self._remote_private_repo.create_branch(
-            branch_name, f"{self._version_v_prefixed}-rc.{rc}"
-        )
-        print("v Created branch", branch_name, flush=True)
-        self._get_branch_locally(remote_name, branch_name)
-        print(f"Current branch is now {branch_name}.", flush=True)
-
         return rc
-
-    def wait_for_local_changes_to_be_applied(self) -> bool:
-        print("Apply changes locally.", flush=True)
-        user_feedback = ""
-        while user_feedback not in ("DONE!", "Cancel"):
-            user_feedback = input(
-                'Type "DONE!" or "Cancel" here when done and hit Enter: '
-            )
-        if user_feedback == "DONE!":
-            return True
-
-        print("Process canceled", flush=True)
-        return False
-
-    def push_branch(self, remote_name: str, branch_name: str):
-        print("Pushing branch", branch_name, flush=True)
-        assert self._local_repo is not None
-        self._local_repo.push_branch(remote_name, branch_name)
-        print("v Pushed branch", branch_name, flush=True)
-
-    def open_private_mr(
-        self,
-        source_branch: str,
-        target_branch: str,
-        description: str,
-        remove_source: bool,
-    ) -> int:
-        print(
-            f"Opening MR to merge {source_branch} into {target_branch}",
-            flush=True,
-        )
-        mr_id, mr_url = self._remote_private_repo.open_mr(
-            description,
-            source_branch,
-            target_branch,
-            remove_source,
-            squash=False,
-        )
-        assert mr_id, f"Failed to open MR to merge {source_branch} into {target_branch}"
-        print(f"v Opened MR to merge {source_branch} into {target_branch}", flush=True)
-
-        # Request MR approval
-        self._request_mr_approval(
-            f"`{self._project_name}` patch `{source_branch}` to {target_branch}:\n{mr_url}"
-        )
-
-        return mr_id
-
-    def merge_private_mr(self, mr_id: int):
-        assert self._remote_private_repo.merge_mr(mr_id, 3600)

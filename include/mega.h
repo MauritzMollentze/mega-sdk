@@ -29,10 +29,6 @@
 // version
 #include "mega/version.h"
 
-#ifdef __clang__
-#pragma GCC diagnostic ignored "-Wunqualified-std-cast-call"
-#endif
-
 // project types
 #include "mega/types.h"
 
@@ -120,9 +116,6 @@
 #endif
 #if defined(REQUIRE_USE_MEDIAINFO) && !defined(USE_MEDIAINFO)
 #error compilation with USE_MEDIAINFO is required
-#endif
-#if defined(REQUIRE_USE_PCRE) && !defined(USE_PCRE)
-#error compilation with USE_PCRE is required
 #endif
 
 #endif

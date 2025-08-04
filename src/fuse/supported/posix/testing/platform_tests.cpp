@@ -6,8 +6,8 @@
 #include <map>
 #include <thread>
 
-#include <mega/fuse/common/error_or.h>
-#include <mega/fuse/common/node_info.h>
+#include <mega/common/error_or.h>
+#include <mega/common/node_info.h>
 #include <mega/fuse/common/testing/client.h>
 #include <mega/fuse/common/testing/cloud_path.h>
 #include <mega/fuse/common/testing/utility.h>
@@ -27,9 +27,9 @@ namespace fuse
 namespace testing
 {
 
-#ifndef O_PATH
+#ifndef HAS_OPEN_PATH
 #define O_PATH O_RDONLY
-#endif // !O_PATH
+#endif // !HAS_OPEN_PATH
 
 TEST_P(FUSEPlatformTests, access_at_fails_when_below_file)
 {
@@ -835,7 +835,7 @@ TEST_P(FUSEPlatformTests, read_write_succeeds)
     ASSERT_FALSE(terminate);
 }
 
-TEST_P(FUSEPlatformTests, DISABLED_readdir_succeeds_when_changing)
+TEST_P(FUSEPlatformTests, readdir_succeeds_when_changing)
 {
     auto iterator = opendir(MountPathW());
     ASSERT_TRUE(iterator);
@@ -1263,7 +1263,7 @@ TEST_P(FUSEPlatformTests, rmdir_succeeds)
         auto info = ClientW()->get("/x/s/sd0/sd0d0");
 
         // Directory should no longer be visible in the cloud.
-        if (info.error() != API_ENOENT)
+        if (info.errorOr(API_OK) != API_ENOENT)
             return false;
 
         // Directory should no longer be visible to observer.
@@ -1376,7 +1376,7 @@ TEST_P(FUSEPlatformTests, statvfs_succeeds)
 
     auto info = ClientW()->storageInfo();
 
-    ASSERT_EQ(info.error(), API_OK);
+    ASSERT_EQ(info.errorOr(API_OK), API_OK);
 
     auto available = static_cast<fsblkcnt_t>(info->mAvailable) / BlockSize;
 
@@ -1519,7 +1519,7 @@ TEST_P(FUSEPlatformTests, unlink_at_directory_succeeds)
         auto info = ClientW()->get("/x/s/sd0/sd0d0");
 
         // File's still visible in the cloud.
-        if (info.error() != API_ENOENT)
+        if (info.errorOr(API_OK) != API_ENOENT)
             return false;
 
         // File should no longer be visible by observer.
@@ -1540,7 +1540,7 @@ TEST_P(FUSEPlatformTests, unlink_at_file_succeeds)
         auto info = ClientW()->get("/x/s/sf0");
 
         // File's still visible in the cloud.
-        if (info.error() != API_ENOENT)
+        if (info.errorOr(API_OK) != API_ENOENT)
             return false;
 
         // File should no longer be visible by observer.
@@ -1591,7 +1591,7 @@ TEST_P(FUSEPlatformTests, unlink_succeeds)
         auto info = ClientW()->get("/x/s/sf0");
 
         // File's still visible in the cloud.
-        if (info.error() != API_ENOENT)
+        if (info.errorOr(API_OK) != API_ENOENT)
             return false;
 
         // File should no longer be visible by observer.
