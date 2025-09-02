@@ -18,7 +18,7 @@ pipeline {
             }
             steps{
                 sh "rm -rf ${BUILD_DIR}; mkdir ${BUILD_DIR}"
-                sh "cmake -DENABLE_CHAT=ON -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DVCPKG_ROOT=${VCPKGPATH} -DCMAKE_VERBOSE_MAKEFILE=ON -S ${WORKSPACE} -B ${WORKSPACE}/${BUILD_DIR}"
+                sh "cmake -DENABLE_CHAT=ON -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DVCPKG_ROOT=${VCPKGPATH} -DENABLE_MEDIA_FILE_METADATA=ON -DCMAKE_VERBOSE_MAKEFILE=ON -S ${WORKSPACE} -B ${WORKSPACE}/${BUILD_DIR}"
                 sh "cmake --build ${WORKSPACE}/${BUILD_DIR} -j1"
             }
         }
@@ -56,7 +56,7 @@ pipeline {
                         
                         if [ -z \"\$FAILED\" ]; then
                             # Parallel run
-                            ./tests/integration/test_integration --CI --USERAGENT:${env.USER_AGENT_TESTS_SDK} --APIURL:${APIURL_TO_TEST} ${TESTS_PARALLEL} 2>&1 | tee tests.stdout
+                            ./tests/integration/test_integration --FREEACCOUNTS --CI --USERAGENT:${env.USER_AGENT_TESTS_SDK} --APIURL:${APIURL_TO_TEST} ${TESTS_PARALLEL} 2>&1 | tee tests.stdout
                         [ \"\${PIPESTATUS[0]}\" != \"0\" ] && FAILED=2
                         fi
                         if [ -n \"\$FAILED\" ]; then

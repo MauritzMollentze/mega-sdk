@@ -9,6 +9,9 @@ macro(process_vcpkg_libraries overlays_path)
     # Use internal VCPKG tools
     set(VCPKG_BOOTSTRAP_OPTIONS "-disableMetrics")
     foreach(path IN ITEMS ${overlays_path})
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS" AND EXISTS "${path}/vcpkg_overlay_ports/ios_overlays")
+            list(APPEND VCPKG_OVERLAY_PORTS "${path}/vcpkg_overlay_ports/ios_overlays")
+        endif()
         list(APPEND VCPKG_OVERLAY_PORTS "${path}/vcpkg_overlay_ports")
         list(APPEND VCPKG_OVERLAY_TRIPLETS "${path}/vcpkg_overlay_triplets")
     endforeach()
@@ -69,7 +72,7 @@ macro(process_vcpkg_libraries overlays_path)
         list(APPEND VCPKG_MANIFEST_FEATURES "use-openssl")
     endif()
 
-    if (USE_MEDIAINFO)
+    if (ENABLE_MEDIA_FILE_METADATA)
         list(APPEND VCPKG_MANIFEST_FEATURES "use-mediainfo")
     endif()
 

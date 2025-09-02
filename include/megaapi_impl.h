@@ -5145,7 +5145,12 @@ public:
         error performRequest_passwordLink(MegaRequestPrivate* request);
         error performRequest_importLink_getPublicNode(MegaRequestPrivate* request);
         error performRequest_copy(MegaRequestPrivate* request);
-        error copyTreeFromOwnedNode(shared_ptr<Node> node, const char *newName, shared_ptr<Node> target, vector<NewNode>& treeCopy);
+        error copyTreeFromOwnedNode(
+            shared_ptr<Node> node,
+            const char* newName,
+            shared_ptr<Node> target,
+            vector<NewNode>& treeCopy,
+            const std::optional<std::string>& s4AttributeValue = std::nullopt);
         error performRequest_login(MegaRequestPrivate* request);
         error performRequest_tagNode(MegaRequestPrivate* request);
         void CRUDNodeTagOperation(MegaNode* node,
@@ -6269,6 +6274,8 @@ public:
 
     int getLogLevel() const override;
 
+    int getFileExplorerView() const override;
+
     MegaFuseInodeCacheFlags* getInodeCacheFlags() override;
 
     MegaFuseExecutorFlags* getMountExecutorFlags() override;
@@ -6278,6 +6285,8 @@ public:
     void setFlushDelay(size_t seconds) override;
 
     void setLogLevel(int level) override;
+
+    void setFileExplorerView(int view) override;
 }; // MegaFuseFlagsPrivate
 
 using MegaMountFlagsPtr = std::unique_ptr<MegaMountFlags>;

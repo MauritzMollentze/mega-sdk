@@ -28,6 +28,7 @@
 #define PREFER_STDARG
 #include "megaapi_impl.h"
 
+#include "mega/canceller.h"
 #include "mega/mediafileattribute.h"
 #include "mega/scoped_helpers.h"
 #include "mega/tlv.h"
@@ -1242,7 +1243,7 @@ MegaBackgroundMediaUploadPrivate::~MegaBackgroundMediaUploadPrivate()
 {
 }
 
-bool MegaBackgroundMediaUploadPrivate::analyseMediaInfo(const char* inputFilepath)
+bool MegaBackgroundMediaUploadPrivate::analyseMediaInfo([[maybe_unused]] const char* inputFilepath)
 {
 #ifdef USE_MEDIAINFO
     if (!api->client->mediaFileInfo.mediaCodecsReceived)
@@ -5315,6 +5316,10 @@ const char *MegaRequestPrivate::getRequestString() const
         case TYPE_GET_NOTIFICATIONS: return "GET_NOTIFICATIONS";
         case TYPE_DEL_ATTR_USER:
             return "DEL_ATTR_USER";
+        case TYPE_BACKUP_PAUSE_MD:
+            return "BACKUP_PAUSE_MD";
+        case TYPE_BACKUP_RESUME_MD:
+            return "BACKUP_RESUME_MD";
         case TYPE_IMPORT_PASSWORDS_FROM_FILE:
             return "IMPORT_PASSWORDS_FROM_FILE";
         case TYPE_GET_SUBSCRIPTION_CANCELLATION_DETAILS:
@@ -7135,9 +7140,11 @@ char *MegaApiImpl::getMyCredentials()
     }
 
     string result;
-    if (client->signkey)
+    if (client->mEd255Key)
     {
-        result = AuthRing::fingerprint(string((const char*)client->signkey->pubKey, EdDSA::PUBLIC_KEY_LENGTH), true);
+        result = AuthRing::fingerprint(
+            string((const char*)client->mEd255Key->pubKey, EdDSA::PUBLIC_KEY_LENGTH),
+            true);
     }
 
     return result.size() ? MegaApi::strdup(result.c_str()) : nullptr;
@@ -7648,6 +7655,7 @@ void MegaApiImpl::multiFactorAuthCancelAccount(const char *pin, MegaRequestListe
 void MegaApiImpl::fastLogin(const char *session, MegaRequestListener *listener)
 {
     MegaRequestPrivate *request = new MegaRequestPrivate(MegaRequest::TYPE_LOGIN, listener);
+    request->setTransferredBytes(static_cast<long long>(cancel_epoch_snapshot()));
     request->setSessionKey(session);
 
     request->performRequest = [this, request]()
@@ -7708,6 +7716,7 @@ void MegaApiImpl::getUserData(const char *user, MegaRequestListener *listener)
 void MegaApiImpl::login(const char *login, const char *password, MegaRequestListener *listener)
 {
     MegaRequestPrivate *request = new MegaRequestPrivate(MegaRequest::TYPE_LOGIN, listener);
+    request->setTransferredBytes(static_cast<long long>(cancel_epoch_snapshot()));
     request->setEmail(login);
     request->setPassword(password);
 
@@ -8186,6 +8195,7 @@ void MegaApiImpl::loginToFolder(const char* megaFolderLink,
                                 MegaRequestListener* listener)
 {
     MegaRequestPrivate *request = new MegaRequestPrivate(MegaRequest::TYPE_LOGIN, listener);
+    request->setTransferredBytes(static_cast<long long>(cancel_epoch_snapshot()));
     request->setLink(megaFolderLink);
     request->setPassword(authKey);
     request->setEmail("FOLDER");
@@ -9074,6 +9084,7 @@ void MegaApiImpl::changePassword(const char *oldPassword, const char *newPasswor
 
 void MegaApiImpl::logout(bool keepSyncConfigsFile, MegaRequestListener *listener)
 {
+    cancel_epoch_bump();
     MegaRequestPrivate *request = new MegaRequestPrivate(MegaRequest::TYPE_LOGOUT, listener);
     request->setFlag(true);
     request->setTransferTag(keepSyncConfigsFile);
@@ -9089,6 +9100,7 @@ void MegaApiImpl::logout(bool keepSyncConfigsFile, MegaRequestListener *listener
 
 void MegaApiImpl::localLogout(MegaRequestListener *listener)
 {
+    cancel_epoch_bump();
     MegaRequestPrivate *request = new MegaRequestPrivate(MegaRequest::TYPE_LOGOUT, listener);
     request->setFlag(false);
 
@@ -19976,6 +19988,7 @@ error MegaApiImpl::performRequest_login(MegaRequestPrivate* request)
             const char* megaFolderLink = request->getLink();
             const char* sessionKey = request->getSessionKey();
             const bool tryToResumeFolderLinkFromCache{request->getFlag()};
+            const auto cancelSnapshot{request->getTransferredBytes()};
 
             if (!megaFolderLink && (!(login && password)) && !sessionKey)
             {
@@ -19998,6 +20011,15 @@ error MegaApiImpl::performRequest_login(MegaRequestPrivate* request)
 
             error e = API_OK;
             client->locallogout(false, true);
+
+            client->mLoginCancelSnapshot = static_cast<cancel_epoch_t>(cancelSnapshot);
+            if (ScopedCanceller(client->mLoginCancelSnapshot).triggered())
+            {
+                // Should we abort at this point?
+                LOG_warn << "[performRequest_login] A MegaApi locallogout triggered the cancel "
+                            "epoch, which will affect this request";
+            }
+
             if (sessionKey)
             {
                 client->login(Base64::atob(string(sessionKey)));
@@ -20613,7 +20635,11 @@ error MegaApiImpl::performRequest_copy(MegaRequestPrivate* request)
             return API_OK;
 }
 
-error MegaApiImpl::copyTreeFromOwnedNode(shared_ptr<Node> node, const char* newName, shared_ptr<Node> target, vector<NewNode>& treeCopy)
+error MegaApiImpl::copyTreeFromOwnedNode(shared_ptr<Node> node,
+                                         const char* newName,
+                                         shared_ptr<Node> target,
+                                         vector<NewNode>& treeCopy,
+                                         const std::optional<std::string>& s4AttributeValue)
 {
     assert(node);
     assert(!newName || *newName);
@@ -20681,8 +20707,8 @@ error MegaApiImpl::copyTreeFromOwnedNode(shared_ptr<Node> node, const char* newN
     tc.nn[0].parenthandle = UNDEF;
     tc.nn[0].ovhandle = ovhandle;
 
-    // Update name attr
-    if (newName)
+    // Update name or S4 attr
+    if (newName || s4AttributeValue)
     {
         SymmCipher key;
         AttrMap attrs;
@@ -20691,7 +20717,27 @@ error MegaApiImpl::copyTreeFromOwnedNode(shared_ptr<Node> node, const char* newN
         key.setkey((const byte*)tc.nn[0].nodekey.data(), node->type);
         attrs = node->attrs;
 
-        attrs.map['n'] = sname;
+        if (newName)
+        {
+            attrs.map['n'] = sname;
+        }
+
+        if (s4AttributeValue)
+        {
+            const auto s4AttributeKey{AttrMap::string2nameid("s4")};
+            if (const auto it{node->attrs.map.find(s4AttributeKey)};
+                (it == node->attrs.map.end() && !s4AttributeValue->empty()) ||
+                (it != node->attrs.map.end() && it->second != s4AttributeValue.value()))
+            {
+                if (fileAlreadyExisted)
+                {
+                    LOG_debug << "The s4 attribute has changed, so the file is no longer the same";
+
+                    fileAlreadyExisted = false;
+                }
+                attrs.map[s4AttributeKey] = s4AttributeValue.value().c_str();
+            }
+        }
 
         // We need to ensure we are not undoing the sensitive reset
         if (tc.resetSensitive && attrs.map.erase(AttrMap::string2nameid("sen")))
@@ -21151,30 +21197,38 @@ void MegaApiImpl::getAccountDetails(bool storage, bool transfer, bool pro, bool 
     request->setAccess(source);
 
     request->performRequest = [this, request]()
+    {
+        if (client->loggedin() == NOTLOGGEDIN)
         {
-            if (client->loggedin() != FULLACCOUNT)
-            {
-                return API_EACCESS;
-            }
+            return API_EACCESS;
+        }
 
-            int numDetails = request->getNumDetails();
-            bool storage = (numDetails & 0x01) != 0;
-            bool transfer = (numDetails & 0x02) != 0;
-            bool pro = (numDetails & 0x04) != 0;
-            bool transactions = (numDetails & 0x08) != 0;
-            bool purchases = (numDetails & 0x10) != 0;
-            bool sessions = (numDetails & 0x20) != 0;
+        int numDetails = request->getNumDetails();
+        bool storage = (numDetails & 0x01) != 0;
+        bool transfer = (numDetails & 0x02) != 0;
+        bool pro = (numDetails & 0x04) != 0;
+        bool transactions = (numDetails & 0x08) != 0;
+        bool purchases = (numDetails & 0x10) != 0;
+        bool sessions = (numDetails & 0x20) != 0;
 
-            int numReqs = int(storage || transfer || pro) + int(transactions) + int(purchases) + int(sessions);
-            if (numReqs == 0)
-            {
-                return API_EARGS;
-            }
-            request->setNumber(numReqs);
+        int numReqs =
+            int(storage || transfer || pro) + int(transactions) + int(purchases) + int(sessions);
+        if (numReqs == 0)
+        {
+            return API_EARGS;
+        }
+        request->setNumber(numReqs);
 
-            client->getaccountdetails(request->getAccountDetails(), storage, transfer, pro, transactions, purchases, sessions, request->getAccess());
-            return API_OK;
-        };
+        client->getaccountdetails(request->getAccountDetails(),
+                                  storage,
+                                  transfer,
+                                  pro,
+                                  transactions,
+                                  purchases,
+                                  sessions,
+                                  request->getAccess());
+        return API_OK;
+    };
 
     requestQueue.push(request);
     waiter->notify();
@@ -27896,7 +27950,11 @@ void MegaApiImpl::createNodeTree(const MegaNode* parentNode,
                 }
 
                 vector<NewNode> treeToCopy;
-                error err = copyTreeFromOwnedNode(source, tmpNodeTree->getName().c_str(), ovLocation, treeToCopy);
+                error err = copyTreeFromOwnedNode(source,
+                                                  tmpNodeTree->getName().c_str(),
+                                                  ovLocation,
+                                                  treeToCopy,
+                                                  tmpNodeTree->getS4AttributeValue());
                 if (err != API_OK)
                 {
                     if (err == API_EEXIST) // dedicated error code when that exact same file already existed
@@ -40509,6 +40567,11 @@ int MegaFuseFlagsPrivate::getLogLevel() const
     return static_cast<int>(mFlags.mLogLevel);
 }
 
+int MegaFuseFlagsPrivate::getFileExplorerView() const
+{
+    return static_cast<int>(mFlags.mFileExplorerView);
+}
+
 MegaFuseInodeCacheFlags* MegaFuseFlagsPrivate::getInodeCacheFlags()
 {
     return &mInodeCacheFlags;
@@ -40532,6 +40595,11 @@ void MegaFuseFlagsPrivate::setFlushDelay(size_t seconds)
 void MegaFuseFlagsPrivate::setLogLevel(int level)
 {
     mFlags.mLogLevel = static_cast<mega::LogLevel>(level);
+}
+
+void MegaFuseFlagsPrivate::setFileExplorerView(int view)
+{
+    mFlags.mFileExplorerView = static_cast<fuse::FileExplorerView>(view);
 }
 
 MegaMountPrivate::MegaMountPrivate()

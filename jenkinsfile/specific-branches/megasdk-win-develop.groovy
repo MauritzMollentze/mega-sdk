@@ -27,12 +27,12 @@ pipeline {
                 //Build SDK
                 sh "echo Building SDK x64"
                 sh "rm -rf ${BUILD_DIR}; mkdir ${BUILD_DIR}"
-                sh "cmake -DENABLE_CHAT=ON -DVCPKG_ROOT='${VCPKGPATH}' -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_GENERATOR_PLATFORM=x64 -S '${WORKSPACE}' -B '${WORKSPACE}'\\\\build_dir\\\\"
+                sh "cmake -DENABLE_CHAT=ON -DVCPKG_ROOT='${VCPKGPATH}' -DENABLE_MEDIA_FILE_METADATA=ON -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_GENERATOR_PLATFORM=x64 -S '${WORKSPACE}' -B '${WORKSPACE}'\\\\build_dir\\\\"
                 sh "cmake --build '${WORKSPACE}'\\\\build_dir\\\\ --config ${BUILD_TYPE} -j 1"
 
                 sh "echo Building SDK x86"
                 sh "rm -rf build_dir_x86; mkdir build_dir_x86"
-                sh "cmake -DENABLE_CHAT=ON -DVCPKG_ROOT='${VCPKGPATH}' -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_GENERATOR_PLATFORM=Win32 -S '${WORKSPACE}' -B '${WORKSPACE}'\\\\build_dir_x86\\\\"
+                sh "cmake -DENABLE_CHAT=ON -DVCPKG_ROOT='${VCPKGPATH}' -DENABLE_MEDIA_FILE_METADATA=ON -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_GENERATOR_PLATFORM=Win32 -S '${WORKSPACE}' -B '${WORKSPACE}'\\\\build_dir_x86\\\\"
                 sh "cmake --build '${WORKSPACE}'\\\\build_dir_x86\\\\ --config ${BUILD_TYPE} -j 1"
             }
         }
@@ -67,7 +67,7 @@ pipeline {
 
                         tests\\\\unit\\\\${BUILD_TYPE}\\\\test_unit.exe
                         if %ERRORLEVEL% NEQ 0 exit 1
-                        tests\\\\integration\\\\${BUILD_TYPE}\\\\test_integration.exe --CI --USERAGENT:${env.USER_AGENT_TESTS_SDK} --APIURL:${APIURL_TO_TEST} ${TESTS_PARALLEL}
+                        tests\\\\integration\\\\${BUILD_TYPE}\\\\test_integration.exe --FREEACCOUNTS --CI --USERAGENT:${env.USER_AGENT_TESTS_SDK} --APIURL:${APIURL_TO_TEST} ${TESTS_PARALLEL}
                         if %ERRORLEVEL% NEQ 0 set ERROR_VAL=1
                         gzip -c test_integration.log > test_integration_${BUILD_ID}.log.gz
                         rm test_integration.log
